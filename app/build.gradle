@@ -42,7 +42,7 @@ def armOnly = project.findProperty("armOnly")?.toBoolean() ?: false
 android {
     compileSdk = compile_sdk_version
     namespace = 'io.legado.app'
-    ndkVersion "26.1.10909125"
+    ndkVersion = "26.1.10909125"
     kotlin {
         jvmToolchain {
             languageVersion.set(JavaLanguageVersion.of(21))
