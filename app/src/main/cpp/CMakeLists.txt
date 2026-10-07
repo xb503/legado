@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ncnn prebuilt is compiled with OpenMP threading.
 # -static-openmp embeds the OpenMP runtime so no libomp.so is needed at runtime.
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp -static-openmp")
-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fopenmp -static-openmp")
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fopenmp -static-openmp -Wl,-wrap,__kmp_affinity_determine_capable")
 
 # ncnn headers
 include_directories(${CMAKE_SOURCE_DIR}/ncnn)
@@ -35,8 +35,28 @@ set_target_properties(glslang_osd PROPERTIES IMPORTED_LOCATION ${NCNN_LIB_DIR}/l
 add_library(glslang_drl STATIC IMPORTED)
 set_target_properties(glslang_drl PROPERTIES IMPORTED_LOCATION ${NCNN_LIB_DIR}/libglslang-default-resource-limits.a)
 
-# System Vulkan (ncnn auto-detects at runtime; unavailable devices fall back to CPU)
-find_library(vulkan-lib vulkan)
+# System Vulkan (ncnn auto-detects at runtime; unavailable devices fall back to CPU).
+# NDK ships the libvulkan stub only under the API-24 sysroot directory; the app
+# targets android-23 where plain find_library() therefore returns NOTFOUND.
+# Link the API-24 stub explicitly in that case (it only adds DT_NEEDED).
+if(ANDROID_PLATFORM_LEVEL LESS 24)
+    if(ANDROID_ABI STREQUAL "armeabi-v7a")
+        set(VULKAN_TRIPLE arm-linux-androideabi)
+    elseif(ANDROID_ABI STREQUAL "arm64-v8a")
+        set(VULKAN_TRIPLE aarch64-linux-android)
+    elseif(ANDROID_ABI STREQUAL "x86")
+        set(VULKAN_TRIPLE i686-linux-android)
+    elseif(ANDROID_ABI STREQUAL "x86_64")
+        set(VULKAN_TRIPLE x86_64-linux-android)
+    endif()
+    get_filename_component(NDK_PREBUILT_DIR "${CMAKE_CXX_COMPILER}/../.." ABSOLUTE)
+    set(vulkan-lib "${NDK_PREBUILT_DIR}/sysroot/usr/lib/${VULKAN_TRIPLE}/24/libvulkan.so")
+    if(NOT EXISTS "${vulkan-lib}")
+        message(FATAL_ERROR "API-24 Vulkan stub not found: ${vulkan-lib}")
+    endif()
+else()
+    find_library(vulkan-lib vulkan)
+endif()
 
 # JNI shared library (name kept as realcugan_ncnn)
 add_library(realcugan_ncnn SHARED realcugan_jni.cpp)
