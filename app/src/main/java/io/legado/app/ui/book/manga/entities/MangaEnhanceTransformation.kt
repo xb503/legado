@@ -22,8 +22,14 @@ class MangaEnhanceTransformation : BitmapTransformation() {
         private const val TAG = "MangaEnhanceTransform"
         private const val SCALE = 2
 
+        /**
+         * 参与 AI 超分的最大输入像素数（约 2048x2440）。
+         * 超过则跳过超分直接返回原图，避免 2x 输出导致内存压力过大。
+         */
+        private const val MAX_INPUT_PIXELS = 5_000_000L
+
         private const val ID =
-            "io.legado.app.ui.book.manga.entities.MangaEnhanceTransformation.realcugan2x.v1"
+            "io.legado.app.ui.book.manga.entities.MangaEnhanceTransformation.realcugan2x.v2"
         private val ID_BYTES = ID.toByteArray(Charsets.UTF_8)
     }
 
@@ -39,6 +45,10 @@ class MangaEnhanceTransformation : BitmapTransformation() {
         val width = toTransform.width
         val height = toTransform.height
         if (width <= 0 || height <= 0) {
+            return toTransform
+        }
+        if (width.toLong() * height > MAX_INPUT_PIXELS) {
+            Log.i(TAG, "skip super-resolution, image too large: ${width}x${height}")
             return toTransform
         }
         val pixels = IntArray(width * height)
