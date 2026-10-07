@@ -50,6 +50,10 @@ class MangaAdapter(private val context: Context) :
     private var mSharpenEnabled = false
     private var mEnhanceMode = MangaEnhanceNcnn.MODE_REALCUGAN
 
+    // 滑动期间暂停 AI 增强（Lanczos 很快，不暂停），停止后恢复并重绑可见项
+    @Volatile
+    private var mEnhancePaused = false
+
     companion object {
         private const val LOADING_VIEW = 0
         private const val CONTENT_VIEW = 1
@@ -284,20 +288,46 @@ class MangaAdapter(private val context: Context) :
     fun enableMangaSharpen(enable: Boolean, mode: Int) {
         mSharpenEnabled = enable
         mEnhanceMode = mode
+        mEnhancePaused = false
         updateTransformation()
+    }
+
+    /**
+     * 滑动期间暂停 / 恢复 AI 画质增强。
+     * 暂停后新绑定的页面直接加载原图，保证 fling 流畅；停止滑动后由调用方
+     * 重绑可见项，补上增强图。Lanczos 为纯插值、速度快，不暂停。
+     *
+     * @return 状态是否确实发生了切换（未开启增强 / Lanczos / 状态相同时返回 false）
+     */
+    fun setEnhancePaused(paused: Boolean): Boolean {
+        if (!mSharpenEnabled || mEnhanceMode == MangaEnhanceNcnn.MODE_LANCZOS) {
+            return false
+        }
+        if (mEnhancePaused == paused) {
+            return false
+        }
+        mEnhancePaused = paused
+        buildTransformation()
+        return true
     }
 
     /**
      * 按当前开关组合图片变换：画质增强可与灰色/墨水屏叠加
      */
     private fun updateTransformation() {
+        buildTransformation()
+        notifyItemRangeChanged(0, itemCount)
+    }
+
+    private fun buildTransformation() {
         val baseTransformation: BitmapTransformation? = when {
             mEinkEnabled -> EpaperTransformation(currentMangaEInkThreshold)
             mGrayEnabled -> GrayscaleTransformation()
             else -> null
         }
         val transformations = mutableListOf<BitmapTransformation>()
-        if (mSharpenEnabled) {
+        // 滑动暂停期间跳过 AI 变换，fling 过程中新绑定的页面直接显示原图
+        if (mSharpenEnabled && !mEnhancePaused) {
             transformations.add(MangaEnhanceTransformation(mEnhanceMode))
         }
         if (baseTransformation != null) {
@@ -308,6 +338,5 @@ class MangaAdapter(private val context: Context) :
             transformations.size == 1 -> transformations[0]
             else -> MultiTransformation(*transformations.toTypedArray())
         }
-        notifyItemRangeChanged(0, itemCount)
     }
 }

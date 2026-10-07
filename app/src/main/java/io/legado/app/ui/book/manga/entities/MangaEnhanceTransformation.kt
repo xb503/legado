@@ -33,8 +33,9 @@ class MangaEnhanceTransformation(
          */
         private const val MAX_INPUT_PIXELS = 5_000_000L
 
+        // v4：Vulkan 输出修复 + GPU 512 分块，旧版本的失败回退/分块结果全部失效
         private const val ID =
-            "io.legado.app.ui.book.manga.entities.MangaEnhanceTransformation.v3"
+            "io.legado.app.ui.book.manga.entities.MangaEnhanceTransformation.v4"
         private val ID_BYTES = ID.toByteArray(Charsets.UTF_8)
     }
 

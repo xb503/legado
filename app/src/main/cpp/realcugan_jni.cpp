@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <algorithm>
+#include <chrono>
 #include "ncnn/net.h"
 #include "ncnn/mat.h"
 #include "ncnn/gpu.h"
@@ -21,7 +22,8 @@
 #define MODE_ANIME6B 2
 
 static const int SCALE = 2;
-static const int TILE_SIZE = 256;   // 分块大小（源像素）
+static const int TILE_SIZE = 256;   // CPU 分块大小（源像素）
+static const int GPU_TILE_SIZE = 512; // Vulkan 分块大小：大块显著减少 tile 数与提交次数
 static const int TILE_PAD = 16;     // 分块重叠边（源像素），消除拼接接缝
 static const int BLEND_WIDTH = TILE_PAD * SCALE; // 输出侧羽化混合宽度
 
@@ -37,10 +39,15 @@ struct ModelContext {
     std::string paramPath;
     std::string binPath;
     jobject assetManagerRef = nullptr; // GlobalRef，保证重建网络时仍可读取 assets
+    AAssetManager* assetMgr = nullptr; // 缓存 native 指针，降级重建时无需再调 JNI
 };
 
 static ModelContext g_ctx;
 static std::mutex g_lock;
+
+static bool is_planar_rgb_fp32(const ncnn::Mat& m, int expectW, int expectH);
+static bool load_net_assets(ncnn::Net* net, JNIEnv* env);
+static void destroy_net();
 
 // ---------------- 模型网络创建 / 销毁 ----------------
 
@@ -49,9 +56,13 @@ static ncnn::Net* create_net(bool useVulkan) {
     net->opt.use_vulkan_compute = useVulkan;
     net->opt.num_threads = 4;
     if (useVulkan) {
-        // 与官方 ncnn-vulkan 工程一致的 GPU 端选项
-        net->opt.use_fp16_packed = true;
-        net->opt.use_fp16_storage = true;
+        // 关闭打包布局与 fp16 存储：保证从 GPU 下载到 CPU 的输出 Mat
+        // 始终为平面 fp32（否则 c=3 时输出可能是 fp16/打包格式，无法直接按
+        // planar float* 读取）。分块尺寸固定 256，fp32 显存开销可控。
+        net->opt.use_vulkan_compute = true;
+        net->opt.use_packing_layout = false;
+        net->opt.use_fp16_packed = false;
+        net->opt.use_fp16_storage = false;
         net->opt.use_fp16_arithmetic = false;
         net->set_vulkan_device(ncnn::get_gpu_device(0));
     } else {
@@ -66,7 +77,10 @@ static ncnn::Net* create_net(bool useVulkan) {
 }
 
 static bool load_net_assets(ncnn::Net* net, JNIEnv* env) {
-    AAssetManager* mgr = AAssetManager_fromJava(env, g_ctx.assetManagerRef);
+    if (!g_ctx.assetMgr) {
+        g_ctx.assetMgr = AAssetManager_fromJava(env, g_ctx.assetManagerRef);
+    }
+    AAssetManager* mgr = g_ctx.assetMgr;
     if (!mgr) {
         LOGE("AAssetManager_fromJava failed");
         return false;
@@ -101,25 +115,39 @@ static bool extract_once(ncnn::Net* net, const ncnn::Mat& input, ncnn::Mat& outp
 }
 
 // 调用者必须持有 g_lock
-static bool run_inference_locked(const ncnn::Mat& input, ncnn::Mat& output, JNIEnv* env) {
-    if (!g_ctx.net) {
-        return false;
-    }
-    if (extract_once(g_ctx.net, input, output)) {
+static bool extract_into_planar_locked(const ncnn::Mat& input, ncnn::Mat& output,
+                                       int expectW, int expectH, JNIEnv* env) {
+    auto attempt = [&](bool* extractOk) -> bool {
+        ncnn::Mat out;
+        *extractOk = extract_once(g_ctx.net, input, out);
+        if (!*extractOk) return false;
+        if (!is_planar_rgb_fp32(out, expectW, expectH)) {
+            LOGE("bad output layout: dims=%d c=%d w=%d h=%d ep=%d es=%d expect=%dx%d",
+                 out.dims, out.c, out.w, out.h, out.elempack, out.elemsize,
+                 expectW, expectH);
+            return false;
+        }
+        output = out;
+        return true;
+    };
+
+    bool extractOk = false;
+    if (attempt(&extractOk)) {
         return true;
     }
-    LOGE("inference failed (vulkan=%d), trying fallback", (int)g_ctx.usingVulkan);
 
+    // 推理失败或输出不是平面 fp32：若当前在 Vulkan 上，销毁 GPU 网络并重建
+    // 纯 CPU 网络后重试一次，之后永久走 CPU
     if (g_ctx.usingVulkan && !g_ctx.vulkanFailed) {
-        // Vulkan 推理失败：销毁 GPU 网络，重建纯 CPU 网络后重试一次
+        LOGE("vulkan inference unusable (extract=%d), fallback to CPU", (int)extractOk);
         g_ctx.vulkanFailed = true;
         destroy_net();
         ncnn::Net* cpuNet = create_net(false);
         if (load_net_assets(cpuNet, env)) {
             g_ctx.net = cpuNet;
             g_ctx.usingVulkan = false;
-            LOGI("fallback to CPU inference succeeded");
-            if (extract_once(g_ctx.net, input, output)) {
+            LOGI("fallback to CPU inference");
+            if (attempt(&extractOk)) {
                 return true;
             }
         } else {
@@ -272,6 +300,8 @@ static void blend_tile(uint32_t* dst, int outW, int outH,
 static bool upscale_ai_locked(const uint32_t* src, int width, int height,
                               uint32_t* dst, int outW, int outH, JNIEnv* env) {
     bool ok = true;
+    auto t0 = std::chrono::steady_clock::now();
+    int tileCount = 0;
 
     if (width <= TILE_SIZE && height <= TILE_SIZE) {
         ncnn::Mat in(width, height, 3);
@@ -285,10 +315,8 @@ static bool upscale_ai_locked(const uint32_t* src, int width, int height,
             inB[i] = (p & 0xff) / 255.0f;
         }
         ncnn::Mat out;
-        if (!run_inference_locked(in, out, env) ||
-            !is_planar_rgb_fp32(out, outW, outH)) {
-            LOGE("full-frame inference failed or bad layout: dims=%d c=%d w=%d h=%d",
-                 out.dims, out.c, out.w, out.h);
+        if (!extract_into_planar_locked(in, out, outW, outH, env)) {
+            LOGE("full-frame inference failed: %dx%d", width, height);
             return false;
         }
         for (int y = 0; y < outH; y++) {
@@ -300,6 +328,10 @@ static bool upscale_ai_locked(const uint32_t* src, int width, int height,
                     clamp255(((float*)out.channel(2).data)[i]));
             }
         }
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        LOGI("ai upscale mode=%d full %dx%d vulkan=%d took=%lldms",
+             g_ctx.mode, width, height, (int)g_ctx.usingVulkan, (long long)ms);
         return true;
     }
 
@@ -315,15 +347,18 @@ static bool upscale_ai_locked(const uint32_t* src, int width, int height,
         inB[i] = (p & 0xff) / 255.0f;
     }
 
-    int tilesX = (width + TILE_SIZE - 1) / TILE_SIZE;
-    int tilesY = (height + TILE_SIZE - 1) / TILE_SIZE;
+    // Vulkan 显存充足，使用 512 大块：1440 宽页面的 tile 数从约 40+ 降到
+    // 约 12，GPU 提交与重叠带开销大幅下降；CPU 降级时保持 256 小块控制内存
+    const int tileSize = g_ctx.usingVulkan ? GPU_TILE_SIZE : TILE_SIZE;
+    int tilesX = (width + tileSize - 1) / tileSize;
+    int tilesY = (height + tileSize - 1) / tileSize;
 
     for (int ty = 0; ty < tilesY && ok; ty++) {
         for (int tx = 0; tx < tilesX; tx++) {
-            int x0 = tx * TILE_SIZE;
-            int y0 = ty * TILE_SIZE;
-            int x1 = std::min(x0 + TILE_SIZE, width);
-            int y1 = std::min(y0 + TILE_SIZE, height);
+            int x0 = tx * tileSize;
+            int y0 = ty * tileSize;
+            int x1 = std::min(x0 + tileSize, width);
+            int y1 = std::min(y0 + tileSize, height);
 
             // 分块向四周扩展重叠边
             int px0 = std::max(0, x0 - TILE_PAD);
@@ -344,13 +379,14 @@ static bool upscale_ai_locked(const uint32_t* src, int width, int height,
             }
 
             ncnn::Mat tileOut;
-            if (!run_inference_locked(tileIn, tileOut, env) ||
-                !is_planar_rgb_fp32(tileOut, pw * SCALE, ph * SCALE)) {
-                LOGE("tile inference failed at (%d,%d) layout w=%d h=%d",
-                     tx, ty, tileOut.w, tileOut.h);
+            if (!extract_into_planar_locked(tileIn, tileOut,
+                                            pw * SCALE, ph * SCALE, env)) {
+                LOGE("tile inference failed at (%d,%d) tile=%dx%d",
+                     tx, ty, pw, ph);
                 ok = false;
                 break;
             }
+            tileCount++;
 
             // 有重叠区域（含 pad 放大结果）整体参与羽化混合
             int sx0 = 0;
@@ -360,6 +396,13 @@ static bool upscale_ai_locked(const uint32_t* src, int width, int height,
             blend_tile(dst, outW, outH, tileOut, sx0, sy0, sw, sh,
                        px0 * SCALE, py0 * SCALE);
         }
+    }
+    if (ok) {
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        LOGI("ai upscale mode=%d tiled %dx%d tiles=%d/%d vulkan=%d took=%lldms",
+             g_ctx.mode, width, height, tileCount, tilesX * tilesY,
+             (int)g_ctx.usingVulkan, (long long)ms);
     }
     return ok;
 }
@@ -424,8 +467,23 @@ Java_io_legado_app_manga_MangaEnhanceNcnn_nativeInit(
     }
     g_ctx.net = net;
     g_ctx.usingVulkan = useVulkan && !g_ctx.vulkanFailed;
-    LOGI("model loaded mode=%d vulkan=%d (available=%d)",
-         mode, (int)g_ctx.usingVulkan, (int)g_ctx.vulkanAvailable);
+
+    // 预热：用小图跑一次真实推理，提前编译 Vulkan 着色器管线（避免首张图
+    // 卡顿），并验证输出 Mat 确为平面 fp32；若 Vulkan 结果异常会在此一次性
+    // 销毁并重建 CPU 网络（见 extract_into_planar_locked）
+    auto warmT0 = std::chrono::steady_clock::now();
+    ncnn::Mat probe(64, 64, 3);
+    probe.fill(0.5f);
+    ncnn::Mat probeOut;
+    if (!extract_into_planar_locked(probe, probeOut, 64 * SCALE, 64 * SCALE, env)) {
+        LOGE("warmup probe failed mode=%d, model unusable", mode);
+        destroy_net();
+        return JNI_FALSE;
+    }
+    auto warmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - warmT0).count();
+    LOGI("model loaded mode=%d vulkan=%d (available=%d) warmup=%lldms",
+         mode, (int)g_ctx.usingVulkan, (int)g_ctx.vulkanAvailable, (long long)warmMs);
     return JNI_TRUE;
 }
 
@@ -507,6 +565,8 @@ Java_io_legado_app_manga_MangaEnhanceNcnn_nativeRelease(
         env->DeleteGlobalRef(g_ctx.assetManagerRef);
         g_ctx.assetManagerRef = nullptr;
     }
+    // AAssetManager* 由 Java AssetManager 持有，GlobalRef 释放后不可再用
+    g_ctx.assetMgr = nullptr;
 }
 
 } // extern "C"

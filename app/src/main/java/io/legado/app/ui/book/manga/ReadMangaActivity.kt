@@ -280,6 +280,34 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
                     } ?: false
                 }
             }
+            // AI 画质增强较重：拖动/fling 期间暂停，新绑定页面直接显示原图保证
+            // 滑动跟手；停止后重绑可见范围，补上增强图（已增强的走缓存，零成本）
+            addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
+                    when (newState) {
+                        RecyclerView.SCROLL_STATE_DRAGGING,
+                        RecyclerView.SCROLL_STATE_SETTLING -> {
+                            mAdapter.setEnhancePaused(true)
+                        }
+
+                        RecyclerView.SCROLL_STATE_IDLE -> {
+                            if (mAdapter.setEnhancePaused(false)) {
+                                val lm = rv.layoutManager as? LinearLayoutManager
+                                    ?: return
+                                val first = lm.findFirstVisibleItemPosition()
+                                val last = lm.findLastVisibleItemPosition()
+                                if (first != RecyclerView.NO_POSITION
+                                    && last != RecyclerView.NO_POSITION && last >= first
+                                ) {
+                                    mAdapter.notifyItemRangeChanged(
+                                        first, last - first + 1
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            })
         }
         binding.webtoonFrame.run {
             onTouchMiddle {
