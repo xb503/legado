@@ -1046,6 +1046,24 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             appCtx.putPrefBoolean(PreferKey.enableMangaImageEnhance, value)
         }
 
+    var mangaEnhanceScale
+        get() = appCtx.getPrefInt(PreferKey.mangaEnhanceScale, 2)
+        set(value) {
+            appCtx.putPrefInt(PreferKey.mangaEnhanceScale, value)
+        }
+
+    var enableMangaSharpen
+        get() = appCtx.getPrefBoolean(PreferKey.enableMangaSharpen, false)
+        set(value) {
+            appCtx.putPrefBoolean(PreferKey.enableMangaSharpen, value)
+        }
+
+    var mangaSharpenAmount
+        get() = appCtx.getPrefInt(PreferKey.mangaSharpenAmount, 6)
+        set(value) {
+            appCtx.putPrefInt(PreferKey.mangaSharpenAmount, value)
+        }
+
     var welcomeImage
         get() = appCtx.getPrefString(PreferKey.welcomeImage)
         set(value) {

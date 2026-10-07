@@ -56,8 +56,7 @@ object BookCover {
     const val configFileName = "coverRule.json"
     const val fontBackupFileName = "coverFont.ttf"
 
-    // 漫画图片清晰度增强：解码放大倍数与最大解码宽度（防止长图占用过多内存）
-    private const val MANGA_ENHANCE_SCALE = 2
+    // 漫画图片清晰度增强：最大解码宽度（防止长图占用过多内存）
     private const val MANGA_ENHANCE_MAX_WIDTH = 2048
 
     var drawBookName = true
@@ -178,16 +177,17 @@ object BookCover {
         loadOnlyWifi: Boolean = false,
         sourceOrigin: String? = null,
         transformation: Transformation<Bitmap>? = null,
-        imageEnhance: Boolean = false,
+        enhanceScale: Int = 1,
     ): RequestBuilder<Drawable> {
         var options = RequestOptions().set(OkHttpModelLoader.loadOnlyWifiOption, loadOnlyWifi)
             .set(OkHttpModelLoader.mangaOption, true)
         if (sourceOrigin != null) {
             options = options.set(OkHttpModelLoader.sourceOriginOption, sourceOrigin)
         }
-        // 清晰度增强：按更高分辨率解码（放大），再由 MangaEnhanceTransformation 锐化
-        val decodeWidth = if (imageEnhance) {
-            (context.resources.displayMetrics.widthPixels * MANGA_ENHANCE_SCALE)
+        // 清晰度增强：按更高分辨率解码（放大 enhanceScale 倍）
+        val scale = enhanceScale.coerceAtLeast(1)
+        val decodeWidth = if (scale > 1) {
+            (context.resources.displayMetrics.widthPixels * scale)
                 .coerceAtMost(MANGA_ENHANCE_MAX_WIDTH)
         } else {
             context.resources.displayMetrics.widthPixels
