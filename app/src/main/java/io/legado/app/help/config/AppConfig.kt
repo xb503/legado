@@ -1039,6 +1039,13 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             appCtx.putPrefBoolean(PreferKey.enableMangaGray, value)
         }
 
+    //开启图片清晰度放大
+    var enableMangaImageEnhance
+        get() = appCtx.getPrefBoolean(PreferKey.enableMangaImageEnhance, false)
+        set(value) {
+            appCtx.putPrefBoolean(PreferKey.enableMangaImageEnhance, value)
+        }
+
     var welcomeImage
         get() = appCtx.getPrefString(PreferKey.welcomeImage)
         set(value) {

@@ -28,6 +28,7 @@ import io.legado.app.model.ReadManga
 import io.legado.app.ui.book.manga.config.MangaColorFilterConfig
 import io.legado.app.ui.book.manga.entities.EpaperTransformation
 import io.legado.app.ui.book.manga.entities.GrayscaleTransformation
+import io.legado.app.ui.book.manga.entities.ImageEnhanceTransformation
 import io.legado.app.ui.book.manga.entities.MangaPage
 import io.legado.app.ui.book.manga.entities.ReaderLoading
 import io.legado.app.utils.dpToPx
@@ -272,6 +273,16 @@ class MangaAdapter(private val context: Context) :
     fun enableGray(enable: Boolean) {
         mTransformation = if (enable) {
             GrayscaleTransformation()
+        } else {
+            null
+        }
+        notifyItemRangeChanged(0, itemCount)
+    }
+
+    //开启图片清晰度放大
+    fun enableImageEnhance(enable: Boolean) {
+        mTransformation = if (enable) {
+            ImageEnhanceTransformation()
         } else {
             null
         }

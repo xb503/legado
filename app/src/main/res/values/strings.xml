@@ -1559,6 +1559,7 @@
     <string name="manga_epaper_value">阈值</string>
     <string name="disable_horizontal_page_snap">禁用水平翻页效果</string>
     <string name="enable_manga_gray">开启图片灰色</string>
+    <string name="enable_manga_image_enhance">开启图片清晰度放大</string>
     <string name="play_mode">播放模式</string>
     <string name="speed_control">语速控制</string>
     <string name="next">下一首</string>
