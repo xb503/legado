@@ -1,38 +1,30 @@
 package io.legado.app.ui.book.manga.entities
 
 import android.graphics.Bitmap
+import android.util.Log
 import com.bumptech.glide.load.engine.bitmap_recycle.BitmapPool
 import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
+import io.legado.app.manga.RealCuganNcnn
 import java.security.MessageDigest
-import kotlin.math.roundToInt
 
 /**
- * 漫画图片清晰度增强转换器。
+ * 漫画图片 AI 超分辨率转换器（Real-CUGAN ncnn）。
  *
- * 配合更高分辨率的解码请求（放大）使用，对图片做非锐化蒙版（Unsharp Mask）处理：
- * out = 原图 + amount * (原图 - 模糊图)
- * 可增强漫画线条、对白文字的边缘清晰度，本转换器不改变图片尺寸。
+ * 使用本地 Real-CUGAN 模型对漫画图片进行 2 倍超分辨率放大，
+ * 增强线条与对白文字边缘清晰度。若模型未初始化或推理失败，
+ * 则原样返回输入图。
  *
- * @param amount 锐化强度，0 表示不处理
+ * 模型需要在使用前通过 [RealCuganNcnn.ensureInit] 完成初始化。
  */
-class MangaEnhanceTransformation(
-    private val amount: Float = DEFAULT_AMOUNT,
-) : BitmapTransformation() {
+class MangaEnhanceTransformation : BitmapTransformation() {
 
     companion object {
-        const val DEFAULT_AMOUNT = 0.6f
+        private const val TAG = "MangaEnhanceTransform"
+        private const val SCALE = 2
 
         private const val ID =
-            "io.legado.app.ui.book.manga.entities.MangaEnhanceTransformation"
+            "io.legado.app.ui.book.manga.entities.MangaEnhanceTransformation.realcugan2x.v1"
         private val ID_BYTES = ID.toByteArray(Charsets.UTF_8)
-
-        private fun clampChannel(value: Float): Int {
-            return when {
-                value <= 0f -> 0
-                value >= 255f -> 255
-                else -> value.roundToInt()
-            }
-        }
     }
 
     override fun transform(
@@ -41,87 +33,38 @@ class MangaEnhanceTransformation(
         outWidth: Int,
         outHeight: Int,
     ): Bitmap {
-        if (amount <= 0f) {
+        if (!RealCuganNcnn.isAvailable()) {
             return toTransform
         }
         val width = toTransform.width
         val height = toTransform.height
-        if (width <= 2 || height <= 2) {
+        if (width <= 0 || height <= 0) {
             return toTransform
         }
-        val resultBitmap = pool.get(width, height, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(width * height)
         toTransform.getPixels(pixels, 0, width, 0, 0, width, height)
-        // 半径1的盒子模糊（水平、垂直两个一维通道）
-        val blurred = boxBlur(pixels, width, height)
-        for (i in pixels.indices) {
-            val pixel = pixels[i]
-            val blurPixel = blurred[i]
-            val alpha = pixel ushr 24
-            val red = clampChannel(
-                (pixel shr 16 and 0xFF) +
-                        amount * ((pixel shr 16 and 0xFF) - (blurPixel shr 16 and 0xFF))
-            )
-            val green = clampChannel(
-                (pixel shr 8 and 0xFF) +
-                        amount * ((pixel shr 8 and 0xFF) - (blurPixel shr 8 and 0xFF))
-            )
-            val blue = clampChannel(
-                (pixel and 0xFF) +
-                        amount * ((pixel and 0xFF) - (blurPixel and 0xFF))
-            )
-            pixels[i] = (alpha shl 24) or (red shl 16) or (green shl 8) or blue
+
+        val upscaled = try {
+            RealCuganNcnn.upscale(pixels, width, height)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Real-CUGAN upscale exception", e)
+            null
         }
-        resultBitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+
+        if (upscaled == null) {
+            return toTransform
+        }
+
+        val resultW = width * SCALE
+        val resultH = height * SCALE
+        if (upscaled.size < resultW * resultH) {
+            Log.e(TAG, "Real-CUGAN output size mismatch: ${upscaled.size} < ${resultW * resultH}")
+            return toTransform
+        }
+
+        val resultBitmap = pool.get(resultW, resultH, Bitmap.Config.ARGB_8888)
+        resultBitmap.setPixels(upscaled, 0, resultW, 0, 0, resultW, resultH)
         return resultBitmap
-    }
-
-    /**
-     * 可分离的3x3盒子模糊（权重 1/4、2/4、1/4），边缘像素使用邻值钳制
-     */
-    private fun boxBlur(pixels: IntArray, width: Int, height: Int): IntArray {
-        val size = pixels.size
-        val horizontal = IntArray(size)
-        val result = IntArray(size)
-        var index = 0
-        for (y in 0 until height) {
-            val rowStart = y * width
-            for (x in 0 until width) {
-                val left = pixels[rowStart + (x - 1).coerceAtLeast(0)]
-                val center = pixels[rowStart + x]
-                val right = pixels[rowStart + (x + 1).coerceAtMost(width - 1)]
-                horizontal[index++] = blendQuarter(left, center, right)
-            }
-        }
-        index = 0
-        for (y in 0 until height) {
-            val topRow = (y - 1).coerceAtLeast(0) * width
-            val centerRow = y * width
-            val bottomRow = (y + 1).coerceAtMost(height - 1) * width
-            for (x in 0 until width) {
-                result[index] = blendQuarter(
-                    horizontal[topRow + x],
-                    horizontal[centerRow + x],
-                    horizontal[bottomRow + x]
-                )
-                index++
-            }
-        }
-        return result
-    }
-
-    private fun blendQuarter(first: Int, second: Int, third: Int): Int {
-        val alpha = first ushr 24
-        val red = (((first shr 16 and 0xFF) +
-                (second shr 16 and 0xFF) * 2 +
-                (third shr 16 and 0xFF)) shr 2)
-        val green = (((first shr 8 and 0xFF) +
-                (second shr 8 and 0xFF) * 2 +
-                (third shr 8 and 0xFF)) shr 2)
-        val blue = (((first and 0xFF) +
-                (second and 0xFF) * 2 +
-                (third and 0xFF)) shr 2)
-        return (alpha shl 24) or (red shl 16) or (green shl 8) or blue
     }
 
     override fun updateDiskCacheKey(messageDigest: MessageDigest) {
@@ -130,12 +73,10 @@ class MangaEnhanceTransformation(
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
-        if (javaClass != other?.javaClass) return false
-        other as MangaEnhanceTransformation
-        return amount == other.amount
+        return javaClass == other?.javaClass
     }
 
     override fun hashCode(): Int {
-        return ID.hashCode() + amount.hashCode()
+        return ID.hashCode()
     }
 }

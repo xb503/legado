@@ -46,7 +46,8 @@ class MangaAdapter(private val context: Context) :
     private var currentMangaEInkThreshold = 0
     private var mEinkEnabled = false
     private var mGrayEnabled = false
-    private var mImageEnhance = false
+    private var mEnhanceScale = 1
+    private var mSharpenEnabled = false
 
     companion object {
         private const val LOADING_VIEW = 0
@@ -104,7 +105,7 @@ class MangaAdapter(private val context: Context) :
                 if (item is MangaPage) {
                     val isLastImage = item.imageCount > 0 && item.index == item.imageCount - 1
                     loadImageWithRetry(
-                        item.mImageUrl, isHorizontal, isLastImage, mTransformation, mImageEnhance
+                        item.mImageUrl, isHorizontal, isLastImage, mTransformation, mEnhanceScale
                     )
                 }
             }
@@ -114,7 +115,7 @@ class MangaAdapter(private val context: Context) :
             setImageColorFilter()
             val isLastImage = item.imageCount > 0 && item.index == item.imageCount - 1
             loadImageWithRetry(
-                item.mImageUrl, isHorizontal, isLastImage, mTransformation, mImageEnhance
+                item.mImageUrl, isHorizontal, isLastImage, mTransformation, mEnhanceScale
             )
         }
 
@@ -278,14 +279,20 @@ class MangaAdapter(private val context: Context) :
         updateTransformation()
     }
 
-    //开启图片清晰度增强放大
-    fun enableImageEnhance(enable: Boolean) {
-        mImageEnhance = enable
+    //开启图片清晰度增强放大，scale 为解码放大倍数（1 表示不放大）
+    fun enableImageEnhance(enable: Boolean, scale: Int) {
+        mEnhanceScale = if (enable) scale.coerceAtLeast(1) else 1
+        updateTransformation()
+    }
+
+    //开启 AI 超分辨率（Real-CUGAN 2x）
+    fun enableMangaSharpen(enable: Boolean) {
+        mSharpenEnabled = enable
         updateTransformation()
     }
 
     /**
-     * 按当前开关组合图片变换：清晰度增强可与灰色/墨水屏叠加
+     * 按当前开关组合图片变换：AI 超分可与清晰度放大、灰色/墨水屏叠加
      */
     private fun updateTransformation() {
         val baseTransformation: BitmapTransformation? = when {
@@ -293,15 +300,17 @@ class MangaAdapter(private val context: Context) :
             mGrayEnabled -> GrayscaleTransformation()
             else -> null
         }
-        mTransformation = if (mImageEnhance) {
-            val enhanceTransformation = MangaEnhanceTransformation()
-            if (baseTransformation == null) {
-                enhanceTransformation
-            } else {
-                MultiTransformation(enhanceTransformation, baseTransformation)
-            }
-        } else {
-            baseTransformation
+        val transformations = mutableListOf<BitmapTransformation>()
+        if (mSharpenEnabled) {
+            transformations.add(MangaEnhanceTransformation())
+        }
+        if (baseTransformation != null) {
+            transformations.add(baseTransformation)
+        }
+        mTransformation = when {
+            transformations.isEmpty() -> null
+            transformations.size == 1 -> transformations[0]
+            else -> MultiTransformation(*transformations.toTypedArray())
         }
         notifyItemRangeChanged(0, itemCount)
     }

@@ -10,6 +10,9 @@ import android.view.MenuItem
 import android.view.View
 import android.view.WindowManager
 import android.view.animation.LinearInterpolator
+import android.widget.CheckBox
+import android.widget.LinearLayout
+import android.widget.NumberPicker
 import androidx.activity.addCallback
 import androidx.activity.viewModels
 import androidx.appcompat.app.AlertDialog
@@ -69,6 +72,8 @@ import io.legado.app.utils.ACache
 import io.legado.app.utils.GSON
 import io.legado.app.utils.NetworkUtils
 import io.legado.app.utils.StartActivityContract
+import io.legado.app.utils.applyTint
+import io.legado.app.utils.dpToPx
 import io.legado.app.utils.fastBinarySearch
 import io.legado.app.utils.findCenterViewPosition
 import io.legado.app.utils.fromJsonObject
@@ -217,7 +222,13 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
             setMangaImageColorFilter(mangaColorFilter)
             enableMangaEInk(AppConfig.enableMangaEInk, AppConfig.mangaEInkThreshold)
             enableGray(AppConfig.enableMangaGray)
-            enableImageEnhance(AppConfig.enableMangaImageEnhance)
+            enableImageEnhance(AppConfig.enableMangaImageEnhance, AppConfig.mangaEnhanceScale)
+            enableMangaSharpen(AppConfig.enableMangaSharpen)
+        }
+        if (AppConfig.enableMangaSharpen) {
+            io.legado.app.help.coroutine.Coroutine.async {
+                io.legado.app.manga.RealCuganNcnn.ensureInit(this@ReadMangaActivity)
+            }
         }
         setHorizontalScroll(AppConfig.enableMangaHorizontalScroll)
         binding.recyclerView.run {
@@ -699,9 +710,11 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
             }
 
             R.id.menu_manga_image_enhance -> {
-                item.isChecked = !item.isChecked
-                AppConfig.enableMangaImageEnhance = item.isChecked
-                mAdapter.enableImageEnhance(item.isChecked)
+                showMangaEnhanceDialog()
+            }
+
+            R.id.menu_manga_sharpen -> {
+                showMangaSharpenDialog()
             }
         }
         return super.onCompatOptionsItemSelected(item)
@@ -831,6 +844,8 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
         menu.findItem(R.id.menu_gray_manga).isChecked = AppConfig.enableMangaGray
         menu.findItem(R.id.menu_manga_image_enhance).isChecked =
             AppConfig.enableMangaImageEnhance
+        menu.findItem(R.id.menu_manga_sharpen).isChecked =
+            AppConfig.enableMangaSharpen
     }
 
     private fun setDisableMangaScale(disable: Boolean) {
@@ -899,6 +914,72 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
             .show {
                 callback.invoke(it)
             }
+    }
+
+    /**
+     * 图片清晰度增强设置对话框：开关 + 放大倍数选择
+     */
+    private fun showMangaEnhanceDialog() {
+        val padding = 16.dpToPx()
+        val checkBox = CheckBox(this).apply {
+            text = getString(R.string.enable)
+            isChecked = AppConfig.enableMangaImageEnhance
+            setPadding(padding, padding, padding, 0)
+        }
+        val numberPicker = NumberPicker(this).apply {
+            minValue = 1
+            maxValue = 4
+            value = AppConfig.mangaEnhanceScale.coerceIn(1, 4)
+            displayedValues = arrayOf("1x", "2x", "3x", "4x")
+            descendantFocusability = NumberPicker.FOCUS_BLOCK_DESCENDANTS
+        }
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(checkBox)
+            addView(numberPicker)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.enable_manga_image_enhance)
+            .setView(layout)
+            .setPositiveButton(R.string.ok) { _, _ ->
+                val scale = numberPicker.value
+                AppConfig.enableMangaImageEnhance = checkBox.isChecked
+                AppConfig.mangaEnhanceScale = scale
+                mMenu?.findItem(R.id.menu_manga_image_enhance)?.isChecked = checkBox.isChecked
+                mAdapter.enableImageEnhance(checkBox.isChecked, scale)
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show().applyTint()
+    }
+
+    /**
+     * AI 超分辨率（Real-CUGAN 2x）设置对话框：开关。
+     * 首次启用时异步加载本地 ncnn 模型。
+     */
+    private fun showMangaSharpenDialog() {
+        val padding = 16.dpToPx()
+        val checkBox = CheckBox(this).apply {
+            text = getString(R.string.enable)
+            isChecked = AppConfig.enableMangaSharpen
+            setPadding(padding, padding, padding, 0)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.manga_sharpen)
+            .setView(checkBox)
+            .setPositiveButton(R.string.ok) { _, _ ->
+                val enable = checkBox.isChecked
+                AppConfig.enableMangaSharpen = enable
+                mMenu?.findItem(R.id.menu_manga_sharpen)?.isChecked = enable
+                if (enable) {
+                    // 后台初始化 Real-CUGAN 模型
+                    io.legado.app.help.coroutine.Coroutine.async {
+                        io.legado.app.manga.RealCuganNcnn.ensureInit(this@ReadMangaActivity)
+                    }
+                }
+                mAdapter.enableMangaSharpen(enable)
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show().applyTint()
     }
 
     override fun finish() {
