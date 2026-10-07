@@ -63,7 +63,8 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
         imageUrl: String,
         isHorizontal: Boolean,
         isLastImage: Boolean,
-        transformation: Transformation<Bitmap>?
+        transformation: Transformation<Bitmap>?,
+        imageEnhance: Boolean = false
     ) {
         mFlProgress.isVisible = true
         mLoading.isVisible = true
@@ -80,7 +81,8 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                 context,
                 mangaImagePath(imageUrl),
                 sourceOrigin = ReadManga.book?.origin,
-                transformation = transformation
+                transformation = transformation,
+                imageEnhance = imageEnhance
             ).addListener(object : RequestListener<Drawable> {
                 override fun onLoadFailed(
                     e: GlideException?,

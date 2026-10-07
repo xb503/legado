@@ -17,6 +17,7 @@ import androidx.viewbinding.ViewBinding
 import com.bumptech.glide.Glide
 import com.bumptech.glide.ListPreloader.PreloadModelProvider
 import com.bumptech.glide.RequestBuilder
+import com.bumptech.glide.load.MultiTransformation
 import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
 import io.legado.app.base.adapter.ItemViewHolder
 import io.legado.app.base.adapter.RecyclerAdapter.Companion.TYPE_FOOTER_VIEW
@@ -28,6 +29,7 @@ import io.legado.app.model.ReadManga
 import io.legado.app.ui.book.manga.config.MangaColorFilterConfig
 import io.legado.app.ui.book.manga.entities.EpaperTransformation
 import io.legado.app.ui.book.manga.entities.GrayscaleTransformation
+import io.legado.app.ui.book.manga.entities.MangaEnhanceTransformation
 import io.legado.app.ui.book.manga.entities.MangaPage
 import io.legado.app.ui.book.manga.entities.ReaderLoading
 import io.legado.app.utils.dpToPx
@@ -40,6 +42,9 @@ class MangaAdapter(private val context: Context) :
     private lateinit var mConfig: MangaColorFilterConfig
     private var mTransformation: BitmapTransformation? = null
     private var currentMangaEInkThreshold = 0
+    private var mEinkEnabled = false
+    private var mGrayEnabled = false
+    private var mImageEnhance = false
 
     companion object {
         private const val LOADING_VIEW = 0
@@ -97,7 +102,7 @@ class MangaAdapter(private val context: Context) :
                 if (item is MangaPage) {
                     val isLastImage = item.imageCount > 0 && item.index == item.imageCount - 1
                     loadImageWithRetry(
-                        item.mImageUrl, isHorizontal, isLastImage, mTransformation
+                        item.mImageUrl, isHorizontal, isLastImage, mTransformation, mImageEnhance
                     )
                 }
             }
@@ -106,7 +111,9 @@ class MangaAdapter(private val context: Context) :
         fun onBind(item: MangaPage) {
             setImageColorFilter()
             val isLastImage = item.imageCount > 0 && item.index == item.imageCount - 1
-            loadImageWithRetry(item.mImageUrl, isHorizontal, isLastImage, mTransformation)
+            loadImageWithRetry(
+                item.mImageUrl, isHorizontal, isLastImage, mTransformation, mImageEnhance
+            )
         }
 
         fun setImageColorFilter() {
@@ -251,29 +258,48 @@ class MangaAdapter(private val context: Context) :
     }
 
     fun enableMangaEInk(enable: Boolean, value: Int) {
-        if (enable) {
-            currentMangaEInkThreshold = value
-            mTransformation = EpaperTransformation(currentMangaEInkThreshold)
-        } else {
-            mTransformation = null
-        }
-        notifyItemRangeChanged(0, itemCount)
+        mEinkEnabled = enable
+        currentMangaEInkThreshold = value
+        updateTransformation()
     }
 
     fun updateThreshold(mangaEInkThreshold: Int) {
-        if (currentMangaEInkThreshold != mangaEInkThreshold) {
+        if (mEinkEnabled && currentMangaEInkThreshold != mangaEInkThreshold) {
             currentMangaEInkThreshold = mangaEInkThreshold
-            mTransformation = EpaperTransformation(currentMangaEInkThreshold)
-            notifyItemRangeChanged(0, itemCount)
+            updateTransformation()
         }
     }
 
     //开启灰色图片
     fun enableGray(enable: Boolean) {
-        mTransformation = if (enable) {
-            GrayscaleTransformation()
+        mGrayEnabled = enable
+        updateTransformation()
+    }
+
+    //开启图片清晰度增强放大
+    fun enableImageEnhance(enable: Boolean) {
+        mImageEnhance = enable
+        updateTransformation()
+    }
+
+    /**
+     * 按当前开关组合图片变换：清晰度增强可与灰色/墨水屏叠加
+     */
+    private fun updateTransformation() {
+        val baseTransformation: BitmapTransformation? = when {
+            mEinkEnabled -> EpaperTransformation(currentMangaEInkThreshold)
+            mGrayEnabled -> GrayscaleTransformation()
+            else -> null
+        }
+        mTransformation = if (mImageEnhance) {
+            val enhanceTransformation = MangaEnhanceTransformation()
+            if (baseTransformation == null) {
+                enhanceTransformation
+            } else {
+                MultiTransformation(enhanceTransformation, baseTransformation)
+            }
         } else {
-            null
+            baseTransformation
         }
         notifyItemRangeChanged(0, itemCount)
     }

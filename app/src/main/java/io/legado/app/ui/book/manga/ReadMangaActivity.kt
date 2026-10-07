@@ -217,6 +217,7 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
             setMangaImageColorFilter(mangaColorFilter)
             enableMangaEInk(AppConfig.enableMangaEInk, AppConfig.mangaEInkThreshold)
             enableGray(AppConfig.enableMangaGray)
+            enableImageEnhance(AppConfig.enableMangaImageEnhance)
         }
         setHorizontalScroll(AppConfig.enableMangaHorizontalScroll)
         binding.recyclerView.run {
@@ -696,6 +697,12 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
                 mMenu?.findItem(R.id.menu_epaper_manga_setting)?.isVisible = false
                 mAdapter.enableGray(item.isChecked)
             }
+
+            R.id.menu_manga_image_enhance -> {
+                item.isChecked = !item.isChecked
+                AppConfig.enableMangaImageEnhance = item.isChecked
+                mAdapter.enableImageEnhance(item.isChecked)
+            }
         }
         return super.onCompatOptionsItemSelected(item)
     }
@@ -822,6 +829,8 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
         }
         menu.findItem(R.id.menu_disable_manga_page_anim).isChecked = AppConfig.disableMangaPageAnim
         menu.findItem(R.id.menu_gray_manga).isChecked = AppConfig.enableMangaGray
+        menu.findItem(R.id.menu_manga_image_enhance).isChecked =
+            AppConfig.enableMangaImageEnhance
     }
 
     private fun setDisableMangaScale(disable: Boolean) {
