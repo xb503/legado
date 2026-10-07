@@ -1039,19 +1039,7 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             appCtx.putPrefBoolean(PreferKey.enableMangaGray, value)
         }
 
-    //漫画图片清晰度增强放大
-    var enableMangaImageEnhance
-        get() = appCtx.getPrefBoolean(PreferKey.enableMangaImageEnhance, false)
-        set(value) {
-            appCtx.putPrefBoolean(PreferKey.enableMangaImageEnhance, value)
-        }
-
-    var mangaEnhanceScale
-        get() = appCtx.getPrefInt(PreferKey.mangaEnhanceScale, 2)
-        set(value) {
-            appCtx.putPrefInt(PreferKey.mangaEnhanceScale, value)
-        }
-
+    //AI 超分辨率（Real-CUGAN 2x）
     var enableMangaSharpen
         get() = appCtx.getPrefBoolean(PreferKey.enableMangaSharpen, false)
         set(value) {

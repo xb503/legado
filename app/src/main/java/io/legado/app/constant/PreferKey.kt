@@ -167,8 +167,6 @@ object PreferKey {
     const val mangaEInkThreshold = "mangaEInkThreshold"
     const val disableHorizontalPageSnap = "disableHorizontalPageSnap"
     const val enableMangaGray = "enableMangaGray"
-    const val enableMangaImageEnhance = "enableMangaImageEnhance"
-    const val mangaEnhanceScale = "mangaEnhanceScale"
     const val enableMangaSharpen = "enableMangaSharpen"
     const val mangaSharpenAmount = "mangaSharpenAmount"
     const val autoRefresh = "auto_refresh"

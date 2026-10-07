@@ -46,7 +46,6 @@ class MangaAdapter(private val context: Context) :
     private var currentMangaEInkThreshold = 0
     private var mEinkEnabled = false
     private var mGrayEnabled = false
-    private var mEnhanceScale = 1
     private var mSharpenEnabled = false
 
     companion object {
@@ -105,7 +104,7 @@ class MangaAdapter(private val context: Context) :
                 if (item is MangaPage) {
                     val isLastImage = item.imageCount > 0 && item.index == item.imageCount - 1
                     loadImageWithRetry(
-                        item.mImageUrl, isHorizontal, isLastImage, mTransformation, mEnhanceScale
+                        item.mImageUrl, isHorizontal, isLastImage, mTransformation
                     )
                 }
             }
@@ -115,7 +114,7 @@ class MangaAdapter(private val context: Context) :
             setImageColorFilter()
             val isLastImage = item.imageCount > 0 && item.index == item.imageCount - 1
             loadImageWithRetry(
-                item.mImageUrl, isHorizontal, isLastImage, mTransformation, mEnhanceScale
+                item.mImageUrl, isHorizontal, isLastImage, mTransformation
             )
         }
 
@@ -276,12 +275,6 @@ class MangaAdapter(private val context: Context) :
     //开启灰色图片
     fun enableGray(enable: Boolean) {
         mGrayEnabled = enable
-        updateTransformation()
-    }
-
-    //开启图片清晰度增强放大，scale 为解码放大倍数（1 表示不放大）
-    fun enableImageEnhance(enable: Boolean, scale: Int) {
-        mEnhanceScale = if (enable) scale.coerceAtLeast(1) else 1
         updateTransformation()
     }
 

@@ -11,8 +11,6 @@ import android.view.View
 import android.view.WindowManager
 import android.view.animation.LinearInterpolator
 import android.widget.CheckBox
-import android.widget.LinearLayout
-import android.widget.NumberPicker
 import androidx.activity.addCallback
 import androidx.activity.viewModels
 import androidx.appcompat.app.AlertDialog
@@ -222,7 +220,6 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
             setMangaImageColorFilter(mangaColorFilter)
             enableMangaEInk(AppConfig.enableMangaEInk, AppConfig.mangaEInkThreshold)
             enableGray(AppConfig.enableMangaGray)
-            enableImageEnhance(AppConfig.enableMangaImageEnhance, AppConfig.mangaEnhanceScale)
             enableMangaSharpen(AppConfig.enableMangaSharpen)
         }
         if (AppConfig.enableMangaSharpen) {
@@ -709,10 +706,6 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
                 mAdapter.enableGray(item.isChecked)
             }
 
-            R.id.menu_manga_image_enhance -> {
-                showMangaEnhanceDialog()
-            }
-
             R.id.menu_manga_sharpen -> {
                 showMangaSharpenDialog()
             }
@@ -842,8 +835,6 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
         }
         menu.findItem(R.id.menu_disable_manga_page_anim).isChecked = AppConfig.disableMangaPageAnim
         menu.findItem(R.id.menu_gray_manga).isChecked = AppConfig.enableMangaGray
-        menu.findItem(R.id.menu_manga_image_enhance).isChecked =
-            AppConfig.enableMangaImageEnhance
         menu.findItem(R.id.menu_manga_sharpen).isChecked =
             AppConfig.enableMangaSharpen
     }
@@ -914,42 +905,6 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
             .show {
                 callback.invoke(it)
             }
-    }
-
-    /**
-     * 图片清晰度增强设置对话框：开关 + 放大倍数选择
-     */
-    private fun showMangaEnhanceDialog() {
-        val padding = 16.dpToPx()
-        val checkBox = CheckBox(this).apply {
-            text = getString(R.string.enable)
-            isChecked = AppConfig.enableMangaImageEnhance
-            setPadding(padding, padding, padding, 0)
-        }
-        val numberPicker = NumberPicker(this).apply {
-            minValue = 1
-            maxValue = 4
-            value = AppConfig.mangaEnhanceScale.coerceIn(1, 4)
-            displayedValues = arrayOf("1x", "2x", "3x", "4x")
-            descendantFocusability = NumberPicker.FOCUS_BLOCK_DESCENDANTS
-        }
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(checkBox)
-            addView(numberPicker)
-        }
-        AlertDialog.Builder(this)
-            .setTitle(R.string.enable_manga_image_enhance)
-            .setView(layout)
-            .setPositiveButton(R.string.ok) { _, _ ->
-                val scale = numberPicker.value
-                AppConfig.enableMangaImageEnhance = checkBox.isChecked
-                AppConfig.mangaEnhanceScale = scale
-                mMenu?.findItem(R.id.menu_manga_image_enhance)?.isChecked = checkBox.isChecked
-                mAdapter.enableImageEnhance(checkBox.isChecked, scale)
-            }
-            .setNegativeButton(R.string.cancel, null)
-            .show().applyTint()
     }
 
     /**
