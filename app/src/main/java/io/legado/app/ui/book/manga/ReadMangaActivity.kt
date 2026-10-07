@@ -11,6 +11,10 @@ import android.view.View
 import android.view.WindowManager
 import android.view.animation.LinearInterpolator
 import android.widget.CheckBox
+import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.TextView
 import androidx.activity.addCallback
 import androidx.activity.viewModels
 import androidx.appcompat.app.AlertDialog
@@ -220,11 +224,13 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
             setMangaImageColorFilter(mangaColorFilter)
             enableMangaEInk(AppConfig.enableMangaEInk, AppConfig.mangaEInkThreshold)
             enableGray(AppConfig.enableMangaGray)
-            enableMangaSharpen(AppConfig.enableMangaSharpen)
+            enableMangaSharpen(AppConfig.enableMangaSharpen, AppConfig.mangaEnhanceMode)
         }
         if (AppConfig.enableMangaSharpen) {
+            val mode = AppConfig.mangaEnhanceMode
             io.legado.app.help.coroutine.Coroutine.async {
-                io.legado.app.manga.RealCuganNcnn.ensureInit(this@ReadMangaActivity)
+                // 子线程加载模型；Lanczos 模式会释放已加载模型
+                io.legado.app.manga.MangaEnhanceNcnn.ensureInit(this@ReadMangaActivity, mode)
             }
         }
         setHorizontalScroll(AppConfig.enableMangaHorizontalScroll)
@@ -908,30 +914,79 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
     }
 
     /**
-     * AI 超分辨率（Real-CUGAN 2x）设置对话框：开关。
-     * 首次启用时异步加载本地 ncnn 模型。
+     * 画质增强设置对话框：总开关 + 三种 2x 放大算法单选。
+     * AI 模型在子线程加载；不支持 Vulkan 时给出 CPU 慢速提示。
      */
     private fun showMangaSharpenDialog() {
         val padding = 16.dpToPx()
-        val checkBox = CheckBox(this).apply {
+        val context = this
+
+        val checkBox = CheckBox(context).apply {
             text = getString(R.string.enable)
             isChecked = AppConfig.enableMangaSharpen
-            setPadding(padding, padding, padding, 0)
         }
-        AlertDialog.Builder(this)
+
+        val labels = listOf(
+            R.string.manga_enhance_lanczos,
+            R.string.manga_enhance_realcugan,
+            R.string.manga_enhance_anime6b,
+        )
+        val radioButtons = labels.map { strId ->
+            RadioButton(context).apply {
+                id = View.generateViewId()
+                text = getString(strId)
+            }
+        }
+        val radioGroup = RadioGroup(context).apply {
+            orientation = RadioGroup.VERTICAL
+            radioButtons.forEach { addView(it) }
+            val currentMode = AppConfig.mangaEnhanceMode.coerceIn(0, radioButtons.lastIndex)
+            check(radioButtons[currentMode].id)
+        }
+
+        // Vulkan 不可用时，选中 AI 模型会显示慢速提示
+        val vulkanAvailable = io.legado.app.manga.MangaEnhanceNcnn.isVulkanAvailable()
+        val tipsView = TextView(context).apply {
+            text = getString(R.string.manga_enhance_cpu_slow)
+            setTextColor(android.graphics.Color.parseColor("#D32F2F"))
+            textSize = 12f
+            visibility = View.GONE
+        }
+        fun refreshTips() {
+            val selected = radioButtons.indexOfFirst { it.isChecked }
+            tipsView.visibility =
+                if (selected >= io.legado.app.manga.MangaEnhanceNcnn.MODE_REALCUGAN
+                    && !vulkanAvailable) View.VISIBLE else View.GONE
+        }
+        radioGroup.setOnCheckedChangeListener { _, _ -> refreshTips() }
+        refreshTips()
+
+        val layout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(padding, padding, padding, 0)
+            addView(checkBox)
+            addView(radioGroup)
+            addView(tipsView)
+        }
+
+        AlertDialog.Builder(context)
             .setTitle(R.string.manga_sharpen)
-            .setView(checkBox)
+            .setView(layout)
             .setPositiveButton(R.string.ok) { _, _ ->
                 val enable = checkBox.isChecked
+                val mode = radioButtons.indexOfFirst { it.isChecked }
+                    .let { if (it < 0) AppConfig.mangaEnhanceMode else it }
                 AppConfig.enableMangaSharpen = enable
+                AppConfig.mangaEnhanceMode = mode
                 mMenu?.findItem(R.id.menu_manga_sharpen)?.isChecked = enable
-                if (enable) {
-                    // 后台初始化 Real-CUGAN 模型
-                    io.legado.app.help.coroutine.Coroutine.async {
-                        io.legado.app.manga.RealCuganNcnn.ensureInit(this@ReadMangaActivity)
-                    }
+                mAdapter.enableMangaSharpen(enable, mode)
+                io.legado.app.help.coroutine.Coroutine.async {
+                    // 启用：子线程加载（切换模式时 native 自动释放上一个模型）；
+                    // 关闭：切到 Lanczos 并释放已加载模型，避免内存占用
+                    val targetMode =
+                        if (enable) mode else io.legado.app.manga.MangaEnhanceNcnn.MODE_LANCZOS
+                    io.legado.app.manga.MangaEnhanceNcnn.ensureInit(this@ReadMangaActivity, targetMode)
                 }
-                mAdapter.enableMangaSharpen(enable)
             }
             .setNegativeButton(R.string.cancel, null)
             .show().applyTint()

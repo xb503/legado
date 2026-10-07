@@ -3,70 +3,130 @@
 #include <android/asset_manager_jni.h>
 #include <android/log.h>
 #include <cstring>
+#include <cmath>
+#include <mutex>
+#include <string>
 #include <algorithm>
 #include "ncnn/net.h"
 #include "ncnn/mat.h"
+#include "ncnn/gpu.h"
 
-#define LOG_TAG "RealCuganNcnn"
+#define LOG_TAG "MangaEnhanceNcnn"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-static ncnn::Net* g_net = nullptr;
-static const int g_scale = 2;
-static const int TILE_SIZE = 256;
-static const int TILE_PAD = 32;
+// 放大模式
+#define MODE_LANCZOS 0
+#define MODE_REALCUGAN 1
+#define MODE_ANIME6B 2
 
-extern "C" {
+static const int SCALE = 2;
+static const int TILE_SIZE = 256;   // 分块大小（源像素）
+static const int TILE_PAD = 16;     // 分块重叠边（源像素），消除拼接接缝
+static const int BLEND_WIDTH = TILE_PAD * SCALE; // 输出侧羽化混合宽度
 
-JNIEXPORT jboolean JNICALL
-Java_io_legado_app_manga_RealCuganNcnn_init(JNIEnv* env, jobject /*thiz*/, jobject assetManager, jstring modelParam, jstring modelBin) {
-    // 先在局部指针上完成全部加载，成功后再发布到 g_net，
-    // 避免加载期间其他线程的 upscale 访问半成品 net
+// 同一时刻只保留一个模型的全部上下文
+struct ModelContext {
+    ncnn::Net* net = nullptr;
+    int mode = MODE_LANCZOS;
+    bool vulkanAvailable = false; // 设备是否支持 Vulkan
+    bool usingVulkan = false;     // 当前网络是否实际运行在 Vulkan 上
+    bool vulkanFailed = false;    // Vulkan 推理曾失败 -> 永久降级 CPU
+    std::string inputBlob = "data";
+    std::string outputBlob = "output";
+    std::string paramPath;
+    std::string binPath;
+    jobject assetManagerRef = nullptr; // GlobalRef，保证重建网络时仍可读取 assets
+};
+
+static ModelContext g_ctx;
+static std::mutex g_lock;
+
+// ---------------- 模型网络创建 / 销毁 ----------------
+
+static ncnn::Net* create_net(bool useVulkan) {
     ncnn::Net* net = new ncnn::Net();
-    net->opt.use_vulkan_compute = false;
+    net->opt.use_vulkan_compute = useVulkan;
     net->opt.num_threads = 4;
-    // 官方 CPU 配置：关闭打包布局与 fp16 存储，保证输出为平面 fp32 Mat，
-    // 否则 extract 返回的 Mat 为打包/半精度布局，按 float* 平面访问会越界崩溃
-    net->opt.use_packing_layout = false;
-    net->opt.use_fp16_packed = false;
-    net->opt.use_fp16_storage = false;
-    net->opt.use_fp16_arithmetic = false;
-    net->opt.use_int8_storage = false;
+    if (useVulkan) {
+        // 与官方 ncnn-vulkan 工程一致的 GPU 端选项
+        net->opt.use_fp16_packed = true;
+        net->opt.use_fp16_storage = true;
+        net->opt.use_fp16_arithmetic = false;
+        net->set_vulkan_device(ncnn::get_gpu_device(0));
+    } else {
+        // CPU：关闭打包布局与 fp16 存储，保证输出为平面 fp32 Mat
+        net->opt.use_packing_layout = false;
+        net->opt.use_fp16_packed = false;
+        net->opt.use_fp16_storage = false;
+        net->opt.use_fp16_arithmetic = false;
+        net->opt.use_int8_storage = false;
+    }
+    return net;
+}
 
-    AAssetManager* mgr = AAssetManager_fromJava(env, assetManager);
+static bool load_net_assets(ncnn::Net* net, JNIEnv* env) {
+    AAssetManager* mgr = AAssetManager_fromJava(env, g_ctx.assetManagerRef);
     if (!mgr) {
         LOGE("AAssetManager_fromJava failed");
-        delete net;
-        return JNI_FALSE;
+        return false;
     }
-
-    const char* paramPath = env->GetStringUTFChars(modelParam, nullptr);
-    const char* binPath = env->GetStringUTFChars(modelBin, nullptr);
-
-    if (net->load_param(mgr, paramPath) != 0) {
-        LOGE("load_param failed: %s", paramPath);
-        env->ReleaseStringUTFChars(modelParam, paramPath);
-        env->ReleaseStringUTFChars(modelBin, binPath);
-        delete net;
-        return JNI_FALSE;
+    if (net->load_param(mgr, g_ctx.paramPath.c_str()) != 0) {
+        LOGE("load_param failed: %s", g_ctx.paramPath.c_str());
+        return false;
     }
-    if (net->load_model(mgr, binPath) != 0) {
-        LOGE("load_model failed: %s", binPath);
-        env->ReleaseStringUTFChars(modelParam, paramPath);
-        env->ReleaseStringUTFChars(modelBin, binPath);
-        delete net;
-        return JNI_FALSE;
+    if (net->load_model(mgr, g_ctx.binPath.c_str()) != 0) {
+        LOGE("load_model failed: %s", g_ctx.binPath.c_str());
+        return false;
     }
+    return true;
+}
 
-    env->ReleaseStringUTFChars(modelParam, paramPath);
-    env->ReleaseStringUTFChars(modelBin, binPath);
-
-    if (g_net) {
-        delete g_net;
+static void destroy_net() {
+    if (g_ctx.net) {
+        delete g_ctx.net;
+        g_ctx.net = nullptr;
     }
-    g_net = net;
-    LOGI("Real-CUGAN model loaded, scale=%d", g_scale);
-    return JNI_TRUE;
+    g_ctx.usingVulkan = false;
+}
+
+// ---------------- 推理（含 Vulkan 失败自动降级 CPU 重试） ----------------
+
+static bool extract_once(ncnn::Net* net, const ncnn::Mat& input, ncnn::Mat& output) {
+    ncnn::Extractor ex = net->create_extractor();
+    // 两类模型均含 Split 分支，必须关闭 light mode
+    ex.set_light_mode(false);
+    ex.input(g_ctx.inputBlob.c_str(), input);
+    return ex.extract(g_ctx.outputBlob.c_str(), output) == 0;
+}
+
+// 调用者必须持有 g_lock
+static bool run_inference_locked(const ncnn::Mat& input, ncnn::Mat& output, JNIEnv* env) {
+    if (!g_ctx.net) {
+        return false;
+    }
+    if (extract_once(g_ctx.net, input, output)) {
+        return true;
+    }
+    LOGE("inference failed (vulkan=%d), trying fallback", (int)g_ctx.usingVulkan);
+
+    if (g_ctx.usingVulkan && !g_ctx.vulkanFailed) {
+        // Vulkan 推理失败：销毁 GPU 网络，重建纯 CPU 网络后重试一次
+        g_ctx.vulkanFailed = true;
+        destroy_net();
+        ncnn::Net* cpuNet = create_net(false);
+        if (load_net_assets(cpuNet, env)) {
+            g_ctx.net = cpuNet;
+            g_ctx.usingVulkan = false;
+            LOGI("fallback to CPU inference succeeded");
+            if (extract_once(g_ctx.net, input, output)) {
+                return true;
+            }
+        } else {
+            delete cpuNet;
+        }
+    }
+    return false;
 }
 
 static bool is_planar_rgb_fp32(const ncnn::Mat& m, int expectW, int expectH) {
@@ -75,157 +135,377 @@ static bool is_planar_rgb_fp32(const ncnn::Mat& m, int expectW, int expectH) {
         && m.elempack == 1 && m.elemsize == (int)sizeof(float);
 }
 
-static ncnn::Mat run_inference(const ncnn::Mat& input) {
-    ncnn::Mat output;
-    ncnn::Extractor ex = g_net->create_extractor();
-    // Real-CUGAN 含 Split 分支层，必须关闭 light mode（与官方一致）
-    ex.set_light_mode(false);
-    ex.input("in0", input);
-    if (ex.extract("out0", output) != 0) {
-        LOGE("extract out0 failed");
-        return ncnn::Mat();
-    }
-    return output;
+static inline int clamp255(float v) {
+    int i = (int)(v * 255.0f + 0.5f);
+    return i < 0 ? 0 : (i > 255 ? 255 : i);
 }
 
-JNIEXPORT jintArray JNICALL
-Java_io_legado_app_manga_RealCuganNcnn_upscale(JNIEnv* env, jobject /*thiz*/, jintArray pixels, jint width, jint height) {
-    if (!g_net || width <= 0 || height <= 0) {
-        return nullptr;
+static inline uint32_t argb_from_rgb(int r, int g, int b) {
+    return 0xff000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
+
+// ---------------- Lanczos3 纯 CPU 插值（分条带，内存友好） ----------------
+
+static inline float lanczos_weight(float x) {
+    if (x == 0.0f) return 1.0f;
+    if (x < 0.0f) x = -x;
+    if (x >= 3.0f) return 0.0f;
+    const float PI = 3.14159265358979323846f;
+    float px = PI * x;
+    return (3.0f * std::sin(px) * std::sin(px / 3.0f)) / (px * px);
+}
+
+static void upscale_lanczos_locked(const uint32_t* src, int width, int height,
+                                   uint32_t* dst, int outW, int outH) {
+    const float invScale = 1.0f / SCALE;
+    const int BAND = 64; // 每次处理 64 个输出行
+    for (int bandY = 0; bandY < outH; bandY += BAND) {
+        int bandH = std::min(BAND, outH - bandY);
+        for (int dy = bandY; dy < bandY + bandH; dy++) {
+            // 输出像素中心映射回源图坐标
+            float sy = (dy + 0.5f) * invScale - 0.5f;
+            int iy0 = (int)std::floor(sy) - 2;
+            int iy1 = (int)std::floor(sy) + 3;
+            iy0 = std::max(0, iy0);
+            iy1 = std::min(height - 1, iy1);
+
+            uint32_t* drow = dst + (long)dy * outW;
+            for (int dx = 0; dx < outW; dx++) {
+                float sx = (dx + 0.5f) * invScale - 0.5f;
+                int ix0 = (int)std::floor(sx) - 2;
+                int ix1 = (int)std::floor(sx) + 3;
+                ix0 = std::max(0, ix0);
+                ix1 = std::min(width - 1, ix1);
+
+                float wr[6];
+                for (int i = 0; i < 6; i++) wr[i] = 0.0f;
+                for (int ix = ix0; ix <= ix1; ix++) {
+                    wr[ix - ix0] = lanczos_weight((float)ix - sx);
+                }
+
+                float r = 0, g = 0, b = 0, wsum = 0;
+                for (int iy = iy0; iy <= iy1; iy++) {
+                    float wy = lanczos_weight((float)iy - sy);
+                    if (wy == 0.0f) continue;
+                    const uint32_t* srow = src + (long)iy * width;
+                    for (int ix = ix0; ix <= ix1; ix++) {
+                        float w = wy * wr[ix - ix0];
+                        uint32_t p = srow[ix];
+                        r += w * ((p >> 16) & 0xff);
+                        g += w * ((p >> 8) & 0xff);
+                        b += w * (p & 0xff);
+                        wsum += w;
+                    }
+                }
+                if (wsum != 0.0f) { r /= wsum; g /= wsum; b /= wsum; }
+                drow[dx] = argb_from_rgb(clamp255(r / 255.0f),
+                                        clamp255(g / 255.0f),
+                                        clamp255(b / 255.0f));
+            }
+        }
+    }
+}
+
+// ---------------- AI 分块推理（带重叠 + 羽化混合） ----------------
+
+// 按 tent 权重把 tile 输出混合进 dst（已有的输出像素参与 alpha 混合）
+static void blend_tile(uint32_t* dst, int outW, int outH,
+                       const ncnn::Mat& tileOut,
+                       int sx0, int sy0, int sw, int sh,
+                       int outX, int outY) {
+    const float* mR = (const float*)tileOut.channel(0).data;
+    const float* mG = (const float*)tileOut.channel(1).data;
+    const float* mB = (const float*)tileOut.channel(2).data;
+    const int W = tileOut.w;
+
+    // 贴图像边界的方向没有相邻 tile，不做羽化
+    const bool edgeL = (outX <= 0);
+    const bool edgeT = (outY <= 0);
+    const bool edgeR = (outX + sw >= outW);
+    const bool edgeB = (outY + sh >= outH);
+
+    for (int y = 0; y < sh; y++) {
+        int oy = outY + y;
+        if (oy < 0 || oy >= outH) continue;
+        // 垂直方向 tent 权重（仅在有相邻 tile 的方向衰减）
+        float wy0 = edgeT ? 1.0f
+                          : (float)std::min(BLEND_WIDTH, y + 1) / BLEND_WIDTH;
+        float wy1 = edgeB ? 1.0f
+                          : (float)std::min(BLEND_WIDTH, sh - y) / BLEND_WIDTH;
+        float ay = std::min(1.0f, std::min(wy0, wy1));
+
+        for (int x = 0; x < sw; x++) {
+            int ox = outX + x;
+            if (ox < 0 || ox >= outW) continue;
+            float wx0 = edgeL ? 1.0f
+                              : (float)std::min(BLEND_WIDTH, x + 1) / BLEND_WIDTH;
+            float wx1 = edgeR ? 1.0f
+                              : (float)std::min(BLEND_WIDTH, sw - x) / BLEND_WIDTH;
+            float alpha = ay * std::min(1.0f, std::min(wx0, wx1));
+
+            int si = (sy0 + y) * W + sx0 + x;
+            int nr = clamp255(mR[si]);
+            int ng = clamp255(mG[si]);
+            int nb = clamp255(mB[si]);
+
+            uint32_t* dp = dst + (long)oy * outW + ox;
+            uint32_t old = *dp;
+            if (old == 0) {
+                // 首次写入：直接写满色。重叠带相邻 tile 权重互补（a+b=1），
+                // 后续 alpha 混合即可得到无接缝结果
+                *dp = argb_from_rgb(nr, ng, nb);
+            } else {
+                int or_ = (old >> 16) & 0xff;
+                int og = (old >> 8) & 0xff;
+                int ob = old & 0xff;
+                float ia = 1.0f - alpha;
+                *dp = argb_from_rgb(
+                    (int)(or_ * ia + nr * alpha + 0.5f),
+                    (int)(og * ia + ng * alpha + 0.5f),
+                    (int)(ob * ia + nb * alpha + 0.5f));
+            }
+        }
+    }
+}
+
+// 调用者持有 g_lock
+static bool upscale_ai_locked(const uint32_t* src, int width, int height,
+                              uint32_t* dst, int outW, int outH, JNIEnv* env) {
+    bool ok = true;
+
+    if (width <= TILE_SIZE && height <= TILE_SIZE) {
+        ncnn::Mat in(width, height, 3);
+        float* inR = (float*)in.channel(0).data;
+        float* inG = (float*)in.channel(1).data;
+        float* inB = (float*)in.channel(2).data;
+        for (int i = 0; i < width * height; i++) {
+            uint32_t p = src[i];
+            inR[i] = ((p >> 16) & 0xff) / 255.0f;
+            inG[i] = ((p >> 8) & 0xff) / 255.0f;
+            inB[i] = (p & 0xff) / 255.0f;
+        }
+        ncnn::Mat out;
+        if (!run_inference_locked(in, out, env) ||
+            !is_planar_rgb_fp32(out, outW, outH)) {
+            LOGE("full-frame inference failed or bad layout: dims=%d c=%d w=%d h=%d",
+                 out.dims, out.c, out.w, out.h);
+            return false;
+        }
+        for (int y = 0; y < outH; y++) {
+            for (int x = 0; x < outW; x++) {
+                int i = y * outW + x;
+                dst[i] = argb_from_rgb(
+                    clamp255(((float*)out.channel(0).data)[i]),
+                    clamp255(((float*)out.channel(1).data)[i]),
+                    clamp255(((float*)out.channel(2).data)[i]));
+            }
+        }
+        return true;
     }
 
-    jint* srcPixels = env->GetIntArrayElements(pixels, nullptr);
-    if (!srcPixels) {
-        return nullptr;
-    }
-
-    const int total = width * height;
-    const int scale = g_scale;
-
+    // 分块：构造平面 fp32 输入
     ncnn::Mat inMat(width, height, 3);
     float* inR = (float*)inMat.channel(0).data;
     float* inG = (float*)inMat.channel(1).data;
     float* inB = (float*)inMat.channel(2).data;
-    for (int i = 0; i < total; i++) {
-        uint32_t p = (uint32_t)srcPixels[i];
+    for (int i = 0; i < width * height; i++) {
+        uint32_t p = src[i];
         inR[i] = ((p >> 16) & 0xff) / 255.0f;
         inG[i] = ((p >> 8) & 0xff) / 255.0f;
         inB[i] = (p & 0xff) / 255.0f;
     }
-    env->ReleaseIntArrayElements(pixels, srcPixels, JNI_ABORT);
 
-    int outW = width * scale;
-    int outH = height * scale;
-    const int outTotal = outW * outH;
+    int tilesX = (width + TILE_SIZE - 1) / TILE_SIZE;
+    int tilesY = (height + TILE_SIZE - 1) / TILE_SIZE;
 
-    // 直接分配最终像素数组，分块推理结果即时写入，避免整幅 fp32 输出占用过大内存
-    jintArray result = env->NewIntArray(outTotal);
+    for (int ty = 0; ty < tilesY && ok; ty++) {
+        for (int tx = 0; tx < tilesX; tx++) {
+            int x0 = tx * TILE_SIZE;
+            int y0 = ty * TILE_SIZE;
+            int x1 = std::min(x0 + TILE_SIZE, width);
+            int y1 = std::min(y0 + TILE_SIZE, height);
+
+            // 分块向四周扩展重叠边
+            int px0 = std::max(0, x0 - TILE_PAD);
+            int py0 = std::max(0, y0 - TILE_PAD);
+            int px1 = std::min(width, x1 + TILE_PAD);
+            int py1 = std::min(height, y1 + TILE_PAD);
+            int pw = px1 - px0;
+            int ph = py1 - py0;
+
+            ncnn::Mat tileIn(pw, ph, 3);
+            float* tR = (float*)tileIn.channel(0).data;
+            float* tG = (float*)tileIn.channel(1).data;
+            float* tB = (float*)tileIn.channel(2).data;
+            for (int y = 0; y < ph; y++) {
+                memcpy(tR + y * pw, inR + (py0 + y) * width + px0, pw * sizeof(float));
+                memcpy(tG + y * pw, inG + (py0 + y) * width + px0, pw * sizeof(float));
+                memcpy(tB + y * pw, inB + (py0 + y) * width + px0, pw * sizeof(float));
+            }
+
+            ncnn::Mat tileOut;
+            if (!run_inference_locked(tileIn, tileOut, env) ||
+                !is_planar_rgb_fp32(tileOut, pw * SCALE, ph * SCALE)) {
+                LOGE("tile inference failed at (%d,%d) layout w=%d h=%d",
+                     tx, ty, tileOut.w, tileOut.h);
+                ok = false;
+                break;
+            }
+
+            // 有重叠区域（含 pad 放大结果）整体参与羽化混合
+            int sx0 = 0;
+            int sy0 = 0;
+            int sw = pw * SCALE;
+            int sh = ph * SCALE;
+            blend_tile(dst, outW, outH, tileOut, sx0, sy0, sw, sh,
+                       px0 * SCALE, py0 * SCALE);
+        }
+    }
+    return ok;
+}
+
+extern "C" {
+
+JNIEXPORT jboolean JNICALL
+Java_io_legado_app_manga_MangaEnhanceNcnn_nativeInit(
+        JNIEnv* env, jobject /*thiz*/, jint mode, jobject assetManager,
+        jstring modelParam, jstring modelBin,
+        jstring inputBlob, jstring outputBlob) {
+    std::lock_guard<std::mutex> guard(g_lock);
+
+    // 释放上一个模型，保证同一时刻只加载一个
+    destroy_net();
+    g_ctx.mode = mode;
+    g_ctx.vulkanAvailable = ncnn::get_gpu_count() > 0;
+    g_ctx.usingVulkan = false;
+    g_ctx.vulkanFailed = false;
+
+    if (mode == MODE_LANCZOS) {
+        // 纯插值，无需加载模型
+        return JNI_TRUE;
+    }
+
+    const char* paramPath = env->GetStringUTFChars(modelParam, nullptr);
+    const char* binPath = env->GetStringUTFChars(modelBin, nullptr);
+    const char* inBlob = env->GetStringUTFChars(inputBlob, nullptr);
+    const char* outBlob = env->GetStringUTFChars(outputBlob, nullptr);
+
+    g_ctx.paramPath = paramPath ? paramPath : "";
+    g_ctx.binPath = binPath ? binPath : "";
+    g_ctx.inputBlob = inBlob ? inBlob : "data";
+    g_ctx.outputBlob = outBlob ? outBlob : "output";
+
+    // 持有 AssetManager 的全局引用，供 Vulkan 失败后重建 CPU 网络时复用
+    if (!g_ctx.assetManagerRef) {
+        g_ctx.assetManagerRef = env->NewGlobalRef(assetManager);
+    }
+
+    bool useVulkan = g_ctx.vulkanAvailable;
+    ncnn::Net* net = create_net(useVulkan);
+    bool loaded = load_net_assets(net, env);
+
+    if (!loaded && useVulkan) {
+        // 极个别设备能枚举到 GPU 但着色器管线初始化失败，直接退回 CPU 加载
+        LOGE("vulkan net load failed, retry with CPU net");
+        delete net;
+        net = create_net(false);
+        g_ctx.vulkanFailed = true;
+        loaded = load_net_assets(net, env);
+    }
+
+    env->ReleaseStringUTFChars(modelParam, paramPath);
+    env->ReleaseStringUTFChars(modelBin, binPath);
+    env->ReleaseStringUTFChars(inputBlob, inBlob);
+    env->ReleaseStringUTFChars(outputBlob, outBlob);
+
+    if (!loaded) {
+        delete net;
+        return JNI_FALSE;
+    }
+    g_ctx.net = net;
+    g_ctx.usingVulkan = useVulkan && !g_ctx.vulkanFailed;
+    LOGI("model loaded mode=%d vulkan=%d (available=%d)",
+         mode, (int)g_ctx.usingVulkan, (int)g_ctx.vulkanAvailable);
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_legado_app_manga_MangaEnhanceNcnn_nativeIsVulkanAvailable(
+        JNIEnv* /*env*/, jobject /*thiz*/) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    return ncnn::get_gpu_count() > 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_legado_app_manga_MangaEnhanceNcnn_nativeIsUsingVulkan(
+        JNIEnv* /*env*/, jobject /*thiz*/) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    return (g_ctx.net && g_ctx.usingVulkan) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jintArray JNICALL
+Java_io_legado_app_manga_MangaEnhanceNcnn_nativeUpscale(
+        JNIEnv* env, jobject /*thiz*/, jintArray pixels, jint width, jint height, jint mode) {
+    if (width <= 0 || height <= 0) {
+        return nullptr;
+    }
+
+    std::lock_guard<std::mutex> guard(g_lock);
+
+    if (mode != MODE_LANCZOS && (!g_ctx.net || g_ctx.mode != mode)) {
+        LOGE("model not ready for mode=%d (current=%d)", mode, g_ctx.mode);
+        return nullptr;
+    }
+
+    jint* srcJint = env->GetIntArrayElements(pixels, nullptr);
+    if (!srcJint) {
+        return nullptr;
+    }
+    const uint32_t* src = reinterpret_cast<const uint32_t*>(srcJint);
+
+    const int outW = width * SCALE;
+    const int outH = height * SCALE;
+    jintArray result = env->NewIntArray(outW * outH);
     if (!result) {
+        env->ReleaseIntArrayElements(pixels, srcJint, JNI_ABORT);
         return nullptr;
     }
-    jint* dst = env->GetIntArrayElements(result, nullptr);
-    if (!dst) {
+    // 初始填充 0（黑），blend_tile 依赖初值判断是否首次写入
+    jint* dstJint = env->GetIntArrayElements(result, nullptr);
+    if (!dstJint) {
+        env->ReleaseIntArrayElements(pixels, srcJint, JNI_ABORT);
         return nullptr;
     }
+    uint32_t* dst = reinterpret_cast<uint32_t*>(dstJint);
 
-    // 将平面 fp32 RGB Mat 的指定矩形转成 ARGB 写入 dst
-    auto writeRegion = [&](const ncnn::Mat& m, int sx0, int sy0, int sw, int sh,
-                           int outX, int outY) {
-        const float* mR = (const float*)m.channel(0).data;
-        const float* mG = (const float*)m.channel(1).data;
-        const float* mB = (const float*)m.channel(2).data;
-        for (int y = 0; y < sh; y++) {
-            const int srcRow = (sy0 + y) * m.w + sx0;
-            jint* drow = dst + (long)(outY + y) * outW + outX;
-            for (int x = 0; x < sw; x++) {
-                int si = srcRow + x;
-                int r = (int)(mR[si] * 255.0f + 0.5f);
-                int g = (int)(mG[si] * 255.0f + 0.5f);
-                int b = (int)(mB[si] * 255.0f + 0.5f);
-                r = r < 0 ? 0 : (r > 255 ? 255 : r);
-                g = g < 0 ? 0 : (g > 255 ? 255 : g);
-                b = b < 0 ? 0 : (b > 255 ? 255 : b);
-                drow[x] = 0xff000000 | (r << 16) | (g << 8) | b;
-            }
-        }
-    };
-
-    bool ok = true;
-
-    if (width <= TILE_SIZE && height <= TILE_SIZE) {
-        ncnn::Mat outMat = run_inference(inMat);
-        if (!is_planar_rgb_fp32(outMat, outW, outH)) {
-            LOGE("unexpected output layout: dims=%d c=%d w=%d h=%d pack=%d es=%zu",
-                 outMat.dims, outMat.c, outMat.w, outMat.h, outMat.elempack, outMat.elemsize);
-            ok = false;
-        } else {
-            writeRegion(outMat, 0, 0, outW, outH, 0, 0);
-        }
+    bool ok;
+    if (mode == MODE_LANCZOS) {
+        upscale_lanczos_locked(src, width, height, dst, outW, outH);
+        ok = true;
     } else {
-        int tilesX = (width + TILE_SIZE - 1) / TILE_SIZE;
-        int tilesY = (height + TILE_SIZE - 1) / TILE_SIZE;
-
-        for (int ty = 0; ty < tilesY && ok; ty++) {
-            for (int tx = 0; tx < tilesX; tx++) {
-                int x0 = tx * TILE_SIZE;
-                int y0 = ty * TILE_SIZE;
-                int x1 = std::min(x0 + TILE_SIZE, width);
-                int y1 = std::min(y0 + TILE_SIZE, height);
-
-                int px0 = std::max(0, x0 - TILE_PAD);
-                int py0 = std::max(0, y0 - TILE_PAD);
-                int px1 = std::min(width, x1 + TILE_PAD);
-                int py1 = std::min(height, y1 + TILE_PAD);
-                int pw = px1 - px0;
-                int ph = py1 - py0;
-
-                ncnn::Mat tileIn(pw, ph, 3);
-                float* tR = (float*)tileIn.channel(0).data;
-                float* tG = (float*)tileIn.channel(1).data;
-                float* tB = (float*)tileIn.channel(2).data;
-                for (int y = 0; y < ph; y++) {
-                    const float* sR = inR + (py0 + y) * width + px0;
-                    const float* sG = inG + (py0 + y) * width + px0;
-                    const float* sB = inB + (py0 + y) * width + px0;
-                    memcpy(tR + y * pw, sR, pw * sizeof(float));
-                    memcpy(tG + y * pw, sG, pw * sizeof(float));
-                    memcpy(tB + y * pw, sB, pw * sizeof(float));
-                }
-
-                ncnn::Mat tileOut = run_inference(tileIn);
-                if (!is_planar_rgb_fp32(tileOut, pw * scale, ph * scale)) {
-                    LOGE("tile output unexpected at (%d,%d): dims=%d c=%d w=%d h=%d pack=%d es=%zu",
-                         tx, ty, tileOut.dims, tileOut.c, tileOut.w, tileOut.h,
-                         tileOut.elempack, tileOut.elemsize);
-                    ok = false;
-                    break;
-                }
-
-                int sx0 = (x0 - px0) * scale;
-                int sy0 = (y0 - py0) * scale;
-                int sw = (x1 - x0) * scale;
-                int sh = (y1 - y0) * scale;
-
-                writeRegion(tileOut, sx0, sy0, sw, sh, x0 * scale, y0 * scale);
-            }
-        }
+        ok = upscale_ai_locked(src, width, height, dst, outW, outH, env);
     }
 
+    env->ReleaseIntArrayElements(pixels, srcJint, JNI_ABORT);
     if (!ok) {
-        // 任一块失败则整体放弃，交回 Kotlin 层回退原图，避免出现局部黑块
-        env->ReleaseIntArrayElements(result, dst, JNI_ABORT);
+        env->ReleaseIntArrayElements(result, dstJint, JNI_ABORT);
         return nullptr;
     }
-
-    env->ReleaseIntArrayElements(result, dst, 0);
+    env->ReleaseIntArrayElements(result, dstJint, 0);
     return result;
 }
 
 JNIEXPORT void JNICALL
-Java_io_legado_app_manga_RealCuganNcnn_release(JNIEnv* env, jobject /*thiz*/) {
-    if (g_net) {
-        delete g_net;
-        g_net = nullptr;
+Java_io_legado_app_manga_MangaEnhanceNcnn_nativeRelease(
+        JNIEnv* env, jobject /*thiz*/) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    destroy_net();
+    g_ctx.mode = MODE_LANCZOS;
+    g_ctx.paramPath.clear();
+    g_ctx.binPath.clear();
+    if (g_ctx.assetManagerRef) {
+        env->DeleteGlobalRef(g_ctx.assetManagerRef);
+        g_ctx.assetManagerRef = nullptr;
     }
 }
 

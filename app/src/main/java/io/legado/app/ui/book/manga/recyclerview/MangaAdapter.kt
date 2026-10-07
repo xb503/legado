@@ -26,6 +26,7 @@ import io.legado.app.base.adapter.RecyclerAdapter.Companion.TYPE_FOOTER_VIEW
 import io.legado.app.databinding.ItemBookMangaEdgeBinding
 import io.legado.app.databinding.ItemBookMangaPageBinding
 import io.legado.app.help.glide.progress.ProgressManager
+import io.legado.app.manga.MangaEnhanceNcnn
 import io.legado.app.model.BookCover
 import io.legado.app.model.ReadManga
 import io.legado.app.ui.book.manga.config.MangaColorFilterConfig
@@ -47,6 +48,7 @@ class MangaAdapter(private val context: Context) :
     private var mEinkEnabled = false
     private var mGrayEnabled = false
     private var mSharpenEnabled = false
+    private var mEnhanceMode = MangaEnhanceNcnn.MODE_REALCUGAN
 
     companion object {
         private const val LOADING_VIEW = 0
@@ -278,14 +280,15 @@ class MangaAdapter(private val context: Context) :
         updateTransformation()
     }
 
-    //开启 AI 超分辨率（Real-CUGAN 2x）
-    fun enableMangaSharpen(enable: Boolean) {
+    //开启画质增强 2x 放大（mode：Lanczos / Real-CUGAN / RealESRGAN Anime6B）
+    fun enableMangaSharpen(enable: Boolean, mode: Int) {
         mSharpenEnabled = enable
+        mEnhanceMode = mode
         updateTransformation()
     }
 
     /**
-     * 按当前开关组合图片变换：AI 超分可与清晰度放大、灰色/墨水屏叠加
+     * 按当前开关组合图片变换：画质增强可与灰色/墨水屏叠加
      */
     private fun updateTransformation() {
         val baseTransformation: BitmapTransformation? = when {
@@ -295,7 +298,7 @@ class MangaAdapter(private val context: Context) :
         }
         val transformations = mutableListOf<BitmapTransformation>()
         if (mSharpenEnabled) {
-            transformations.add(MangaEnhanceTransformation())
+            transformations.add(MangaEnhanceTransformation(mEnhanceMode))
         }
         if (baseTransformation != null) {
             transformations.add(baseTransformation)

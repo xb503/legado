@@ -1039,17 +1039,18 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             appCtx.putPrefBoolean(PreferKey.enableMangaGray, value)
         }
 
-    //AI 超分辨率（Real-CUGAN 2x）
+    //画质增强总开关
     var enableMangaSharpen
         get() = appCtx.getPrefBoolean(PreferKey.enableMangaSharpen, false)
         set(value) {
             appCtx.putPrefBoolean(PreferKey.enableMangaSharpen, value)
         }
 
-    var mangaSharpenAmount
-        get() = appCtx.getPrefInt(PreferKey.mangaSharpenAmount, 6)
+    //画质增强放大模式：0=Lanczos 1=Real-CUGAN 2=RealESRGAN Anime6B
+    var mangaEnhanceMode
+        get() = appCtx.getPrefInt(PreferKey.mangaEnhanceMode, 1)
         set(value) {
-            appCtx.putPrefInt(PreferKey.mangaSharpenAmount, value)
+            appCtx.putPrefInt(PreferKey.mangaEnhanceMode, value)
         }
 
     var welcomeImage
