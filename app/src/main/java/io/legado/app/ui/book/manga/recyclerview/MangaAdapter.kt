@@ -1,6 +1,7 @@
 package io.legado.app.ui.book.manga.recyclerview
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.util.SparseArray
@@ -18,6 +19,7 @@ import com.bumptech.glide.Glide
 import com.bumptech.glide.ListPreloader.PreloadModelProvider
 import com.bumptech.glide.RequestBuilder
 import com.bumptech.glide.load.MultiTransformation
+import com.bumptech.glide.load.Transformation
 import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
 import io.legado.app.base.adapter.ItemViewHolder
 import io.legado.app.base.adapter.RecyclerAdapter.Companion.TYPE_FOOTER_VIEW
@@ -40,7 +42,7 @@ class MangaAdapter(private val context: Context) :
 
     private val inflater: LayoutInflater = LayoutInflater.from(context)
     private lateinit var mConfig: MangaColorFilterConfig
-    private var mTransformation: BitmapTransformation? = null
+    private var mTransformation: Transformation<Bitmap>? = null
     private var currentMangaEInkThreshold = 0
     private var mEinkEnabled = false
     private var mGrayEnabled = false
