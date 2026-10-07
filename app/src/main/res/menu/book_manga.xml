@@ -142,4 +142,11 @@
         android:title="@string/enable_manga_gray"
         app:showAsAction="never"/>
 
+    <item
+        android:id="@+id/menu_manga_image_enhance"
+        android:checkable="true"
+        android:checked="false"
+        android:title="@string/enable_manga_image_enhance"
+        app:showAsAction="never" />
+
 </menu>
