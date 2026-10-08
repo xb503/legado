@@ -8,6 +8,8 @@
 #include <string>
 #include <algorithm>
 #include <chrono>
+#include <atomic>
+#include <thread>
 #include "ncnn/net.h"
 #include "ncnn/mat.h"
 #include "ncnn/gpu.h"
@@ -34,6 +36,7 @@ struct ModelContext {
     bool vulkanAvailable = false; // 设备是否支持 Vulkan
     bool usingVulkan = false;     // 当前网络是否实际运行在 Vulkan 上
     bool vulkanFailed = false;    // Vulkan 推理曾失败 -> 永久降级 CPU
+    bool useFp16 = false;         // 当前网络是否启用 fp16 存储/算术
     std::string inputBlob = "data";
     std::string outputBlob = "output";
     std::string paramPath;
@@ -45,32 +48,40 @@ struct ModelContext {
 static ModelContext g_ctx;
 static std::mutex g_lock;
 
+// 任务中止标志：调度器在用户翻页到不在此轮增强窗口时置 true，
+// C++ 分块推理循环在每个 tile 完成后检查，立即终止后续 tile，避免
+// 老的推理继续独占 GPU 导致整机卡顿
+static std::atomic<bool> g_abortFlag{false};
+
 static bool is_planar_rgb_fp32(const ncnn::Mat& m, int expectW, int expectH);
+static bool is_planar_rgb_fp16(const ncnn::Mat& m, int expectW, int expectH);
+static ncnn::Mat convert_fp16_to_fp32_planar(const ncnn::Mat& src);
 static bool load_net_assets(ncnn::Net* net, JNIEnv* env);
 static void destroy_net();
 
 // ---------------- 模型网络创建 / 销毁 ----------------
 
-static ncnn::Net* create_net(bool useVulkan) {
+static ncnn::Net* create_net(bool useVulkan, bool useFp16) {
     ncnn::Net* net = new ncnn::Net();
-    net->opt.use_vulkan_compute = useVulkan;
     net->opt.num_threads = 4;
     if (useVulkan) {
-        // 关闭打包布局与 fp16 存储：保证从 GPU 下载到 CPU 的输出 Mat
-        // 始终为平面 fp32（否则 c=3 时输出可能是 fp16/打包格式，无法直接按
-        // planar float* 读取）。分块尺寸固定 256，fp32 显存开销可控。
+        // 关闭打包布局：保证从 GPU 下载到 CPU 的输出 Mat 始终为 planar
+        // （elempack=1）。fp16 优先：GPU 上 fp16 通常 2x 性能且显存减半，
+        // 输出 elemsize=2、elempack=1，由 extract_into_planar_locked 统一
+        // 转回 fp32。预热阶段若 fp16 输出出现 NaN/Inf 会一次性销毁并重建
+        // fp32 网络（仍失败则进一步降级 CPU）。
         net->opt.use_vulkan_compute = true;
         net->opt.use_packing_layout = false;
         net->opt.use_fp16_packed = false;
-        net->opt.use_fp16_storage = false;
-        net->opt.use_fp16_arithmetic = false;
+        net->opt.use_fp16_storage = useFp16;
+        net->opt.use_fp16_arithmetic = useFp16;
         net->set_vulkan_device(ncnn::get_gpu_device(0));
     } else {
-        // CPU：关闭打包布局与 fp16 存储，保证输出为平面 fp32 Mat
+        // CPU：同样关闭打包布局；fp16 在 CPU 上按需启用
         net->opt.use_packing_layout = false;
         net->opt.use_fp16_packed = false;
-        net->opt.use_fp16_storage = false;
-        net->opt.use_fp16_arithmetic = false;
+        net->opt.use_fp16_storage = useFp16;
+        net->opt.use_fp16_arithmetic = useFp16;
         net->opt.use_int8_storage = false;
     }
     return net;
@@ -121,14 +132,29 @@ static bool extract_into_planar_locked(const ncnn::Mat& input, ncnn::Mat& output
         ncnn::Mat out;
         *extractOk = extract_once(g_ctx.net, input, out);
         if (!*extractOk) return false;
-        if (!is_planar_rgb_fp32(out, expectW, expectH)) {
-            LOGE("bad output layout: dims=%d c=%d w=%d h=%d ep=%d es=%d expect=%dx%d",
-                 out.dims, out.c, out.w, out.h, out.elempack, out.elemsize,
-                 expectW, expectH);
-            return false;
+        if (is_planar_rgb_fp32(out, expectW, expectH)) {
+            output = out;
+            return true;
         }
-        output = out;
-        return true;
+        if (is_planar_rgb_fp16(out, expectW, expectH)) {
+            // fp16 planar：转 fp32，并校验数值（NaN/Inf 视为推理失败，
+            // 触发外层 fp16→fp32 / Vulkan→CPU 降级重建）
+            ncnn::Mat fp32Out = convert_fp16_to_fp32_planar(out);
+            const int total = expectW * expectH;
+            const float* pR = (const float*)fp32Out.channel(0).data;
+            for (int i = 0; i < total; i++) {
+                if (!std::isfinite(pR[i])) {
+                    LOGE("fp16 output has NaN/Inf at idx=%d", i);
+                    return false;
+                }
+            }
+            output = std::move(fp32Out);
+            return true;
+        }
+        LOGE("bad output layout: dims=%d c=%d w=%d h=%d ep=%d es=%d expect=%dx%d",
+             out.dims, out.c, out.w, out.h, out.elempack, out.elemsize,
+             expectW, expectH);
+        return false;
     };
 
     bool extractOk = false;
@@ -136,22 +162,42 @@ static bool extract_into_planar_locked(const ncnn::Mat& input, ncnn::Mat& output
         return true;
     }
 
-    // 推理失败或输出不是平面 fp32：若当前在 Vulkan 上，销毁 GPU 网络并重建
-    // 纯 CPU 网络后重试一次，之后永久走 CPU
-    if (g_ctx.usingVulkan && !g_ctx.vulkanFailed) {
-        LOGE("vulkan inference unusable (extract=%d), fallback to CPU", (int)extractOk);
+    // 降级策略（按 g_ctx.useFp16 / usingVulkan / vulkanFailed 状态推进）：
+    //   fp16 失败 → 重建 fp32 网络（保持 Vulkan/CPU 选择不变）
+    //   fp32 + Vulkan 失败 → 重建 CPU fp32 网络
+    //   fp32 + CPU 失败 → 直接返回 false（无法继续降级）
+    bool rebuildVulkan = false;
+    bool rebuildFp16 = false;
+    bool doRebuild = false;
+
+    if (g_ctx.useFp16) {
+        LOGE("fp16 inference unusable (extract=%d), rebuild fp32 net", (int)extractOk);
+        g_ctx.useFp16 = false;
+        rebuildVulkan = g_ctx.usingVulkan && !g_ctx.vulkanFailed;
+        rebuildFp16 = false;
+        doRebuild = true;
+    } else if (g_ctx.usingVulkan && !g_ctx.vulkanFailed) {
+        LOGE("vulkan fp32 inference unusable (extract=%d), fallback to CPU", (int)extractOk);
         g_ctx.vulkanFailed = true;
+        rebuildVulkan = false;
+        rebuildFp16 = false;
+        doRebuild = true;
+    }
+
+    if (doRebuild) {
         destroy_net();
-        ncnn::Net* cpuNet = create_net(false);
-        if (load_net_assets(cpuNet, env)) {
-            g_ctx.net = cpuNet;
-            g_ctx.usingVulkan = false;
-            LOGI("fallback to CPU inference");
+        ncnn::Net* newNet = create_net(rebuildVulkan, rebuildFp16);
+        if (load_net_assets(newNet, env)) {
+            g_ctx.net = newNet;
+            g_ctx.usingVulkan = rebuildVulkan;
+            g_ctx.useFp16 = rebuildFp16;
+            LOGI("rebuilt net: vulkan=%d fp16=%d",
+                 (int)rebuildVulkan, (int)rebuildFp16);
             if (attempt(&extractOk)) {
                 return true;
             }
         } else {
-            delete cpuNet;
+            delete newNet;
         }
     }
     return false;
@@ -161,6 +207,60 @@ static bool is_planar_rgb_fp32(const ncnn::Mat& m, int expectW, int expectH) {
     return !m.empty() && m.dims == 3 && m.c == 3
         && m.w == expectW && m.h == expectH
         && m.elempack == 1 && m.elemsize == (int)sizeof(float);
+}
+
+static bool is_planar_rgb_fp16(const ncnn::Mat& m, int expectW, int expectH) {
+    return !m.empty() && m.dims == 3 && m.c == 3
+        && m.w == expectW && m.h == expectH
+        && m.elempack == 1 && m.elemsize == 2;
+}
+
+// IEEE 754 半精度 → 单精度
+static inline float fp16_to_fp32(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+    uint32_t exponent = (h >> 10) & 0x1fu;
+    uint32_t mantissa = h & 0x3ffu;
+    uint32_t bits;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign; // ±0
+        } else {
+            // 非规格化：找到前导 1（左移到第 10 位即隐含位）
+            int e = 0;
+            uint32_t m = mantissa;
+            while ((m & 0x400u) == 0) { m <<= 1; e++; }
+            uint32_t fp32_exp = (uint32_t)(113 - e);
+            uint32_t fp32_mant = (m << 13) & 0x7fffffu;
+            bits = sign | (fp32_exp << 23) | fp32_mant;
+        }
+    } else if (exponent == 0x1fu) {
+        // inf / nan
+        bits = sign | 0x7f800000u | (mantissa << 13);
+    } else {
+        // 规格化
+        uint32_t fp32_exp = exponent - 15 + 127;
+        uint32_t fp32_mant = mantissa << 13;
+        bits = sign | (fp32_exp << 23) | fp32_mant;
+    }
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+// 把 fp16 planar Mat 转为 fp32 planar Mat
+static ncnn::Mat convert_fp16_to_fp32_planar(const ncnn::Mat& src) {
+    ncnn::Mat dst(src.w, src.h, src.c);
+    dst.elempack = 1;
+    dst.elemsize = sizeof(float);
+    const int total = src.w * src.h;
+    for (int c = 0; c < src.c; c++) {
+        const uint16_t* s = (const uint16_t*)src.channel(c).data;
+        float* d = (float*)dst.channel(c).data;
+        for (int i = 0; i < total; i++) {
+            d[i] = fp16_to_fp32(s[i]);
+        }
+    }
+    return dst;
 }
 
 static inline int clamp255(float v) {
@@ -395,6 +495,17 @@ static bool upscale_ai_locked(const uint32_t* src, int width, int height,
             int sh = ph * SCALE;
             blend_tile(dst, outW, outH, tileOut, sx0, sy0, sw, sh,
                        px0 * SCALE, py0 * SCALE);
+
+            // 中止检查：调度器在新一轮窗口不再包含本页时置 abortFlag，
+            // 立即停止后续 tile，避免老推理独占 GPU
+            if (g_abortFlag.load(std::memory_order_relaxed)) {
+                LOGI("ai upscale aborted by flag at tile (%d,%d) done=%d/%d",
+                     tx, ty, tileCount, tilesX * tilesY);
+                ok = false;
+                break;
+            }
+            // tile 间让步：让 GPU 命令队列有时间完成提交，缓解整机冻结
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
     if (ok) {
@@ -418,10 +529,12 @@ Java_io_legado_app_manga_MangaEnhanceNcnn_nativeInit(
 
     // 释放上一个模型，保证同一时刻只加载一个
     destroy_net();
+    g_abortFlag.store(false, std::memory_order_relaxed); // 清上轮残留
     g_ctx.mode = mode;
     g_ctx.vulkanAvailable = ncnn::get_gpu_count() > 0;
     g_ctx.usingVulkan = false;
     g_ctx.vulkanFailed = false;
+    g_ctx.useFp16 = false;
 
     if (mode == MODE_LANCZOS) {
         // 纯插值，无需加载模型
@@ -444,14 +557,16 @@ Java_io_legado_app_manga_MangaEnhanceNcnn_nativeInit(
     }
 
     bool useVulkan = g_ctx.vulkanAvailable;
-    ncnn::Net* net = create_net(useVulkan);
+    // 优先 Vulkan+fp16：GPU 上 fp16 通常 2x 性能且显存减半；预热失败会
+    // 自动降级 fp32 / CPU（由 extract_into_planar_locked 内部兜底）
+    ncnn::Net* net = create_net(useVulkan, true);
     bool loaded = load_net_assets(net, env);
 
     if (!loaded && useVulkan) {
         // 极个别设备能枚举到 GPU 但着色器管线初始化失败，直接退回 CPU 加载
         LOGE("vulkan net load failed, retry with CPU net");
         delete net;
-        net = create_net(false);
+        net = create_net(false, true);
         g_ctx.vulkanFailed = true;
         loaded = load_net_assets(net, env);
     }
@@ -467,23 +582,26 @@ Java_io_legado_app_manga_MangaEnhanceNcnn_nativeInit(
     }
     g_ctx.net = net;
     g_ctx.usingVulkan = useVulkan && !g_ctx.vulkanFailed;
+    g_ctx.useFp16 = true; // 实际是否可用由下面预热决定
 
     // 预热：用小图跑一次真实推理，提前编译 Vulkan 着色器管线（避免首张图
-    // 卡顿），并验证输出 Mat 确为平面 fp32；若 Vulkan 结果异常会在此一次性
-    // 销毁并重建 CPU 网络（见 extract_into_planar_locked）
+    // 卡顿），并校验输出 Mat 可用；若 fp16 输出出现 NaN/Inf 或 Vulkan
+    // 异常会在此一次性销毁并重建 fp32 网络（仍失败则进一步降级 CPU）。
     auto warmT0 = std::chrono::steady_clock::now();
     ncnn::Mat probe(64, 64, 3);
     probe.fill(0.5f);
     ncnn::Mat probeOut;
     if (!extract_into_planar_locked(probe, probeOut, 64 * SCALE, 64 * SCALE, env)) {
-        LOGE("warmup probe failed mode=%d, model unusable", mode);
+        LOGE("warmup probe failed mode=%d, model unusable after fp32/cpu fallback",
+             mode);
         destroy_net();
         return JNI_FALSE;
     }
     auto warmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - warmT0).count();
-    LOGI("model loaded mode=%d vulkan=%d (available=%d) warmup=%lldms",
-         mode, (int)g_ctx.usingVulkan, (int)g_ctx.vulkanAvailable, (long long)warmMs);
+    LOGI("model loaded mode=%d vulkan=%d (available=%d) fp16=%d warmup=%lldms",
+         mode, (int)g_ctx.usingVulkan, (int)g_ctx.vulkanAvailable,
+         (int)g_ctx.useFp16, (long long)warmMs);
     return JNI_TRUE;
 }
 
@@ -554,11 +672,20 @@ Java_io_legado_app_manga_MangaEnhanceNcnn_nativeUpscale(
 }
 
 JNIEXPORT void JNICALL
+Java_io_legado_app_manga_MangaEnhanceNcnn_nativeSetAbort(
+        JNIEnv* /*env*/, jobject /*thiz*/, jboolean abort) {
+    // 不加锁：abortFlag 为 atomic，仅作 cooperative cancellation 信号
+    g_abortFlag.store(abort != JNI_FALSE, std::memory_order_relaxed);
+}
+
+JNIEXPORT void JNICALL
 Java_io_legado_app_manga_MangaEnhanceNcnn_nativeRelease(
         JNIEnv* env, jobject /*thiz*/) {
     std::lock_guard<std::mutex> guard(g_lock);
     destroy_net();
+    g_abortFlag.store(false, std::memory_order_relaxed);
     g_ctx.mode = MODE_LANCZOS;
+    g_ctx.useFp16 = false;
     g_ctx.paramPath.clear();
     g_ctx.binPath.clear();
     if (g_ctx.assetManagerRef) {

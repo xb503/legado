@@ -18,9 +18,7 @@ import androidx.viewbinding.ViewBinding
 import com.bumptech.glide.Glide
 import com.bumptech.glide.ListPreloader.PreloadModelProvider
 import com.bumptech.glide.RequestBuilder
-import com.bumptech.glide.load.MultiTransformation
 import com.bumptech.glide.load.Transformation
-import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
 import io.legado.app.base.adapter.ItemViewHolder
 import io.legado.app.base.adapter.RecyclerAdapter.Companion.TYPE_FOOTER_VIEW
 import io.legado.app.databinding.ItemBookMangaEdgeBinding
@@ -32,7 +30,6 @@ import io.legado.app.model.ReadManga
 import io.legado.app.ui.book.manga.config.MangaColorFilterConfig
 import io.legado.app.ui.book.manga.entities.EpaperTransformation
 import io.legado.app.ui.book.manga.entities.GrayscaleTransformation
-import io.legado.app.ui.book.manga.entities.MangaEnhanceTransformation
 import io.legado.app.ui.book.manga.entities.MangaPage
 import io.legado.app.ui.book.manga.entities.ReaderLoading
 import io.legado.app.utils.dpToPx
@@ -49,10 +46,6 @@ class MangaAdapter(private val context: Context) :
     private var mGrayEnabled = false
     private var mSharpenEnabled = false
     private var mEnhanceMode = MangaEnhanceNcnn.MODE_REALCUGAN
-
-    // 滑动期间暂停 AI 增强（Lanczos 很快，不暂停），停止后恢复并重绑可见项
-    @Volatile
-    private var mEnhancePaused = false
 
     companion object {
         private const val LOADING_VIEW = 0
@@ -140,6 +133,14 @@ class MangaAdapter(private val context: Context) :
                 0f, 0f, 0f, (255 - mConfig.a) / 255f, 0f
             )
             binding.image.colorFilter = ColorMatrixColorFilter(ColorMatrix(matrix))
+        }
+
+        /**
+         * 由 MangaEnhanceScheduler 在主线程调用：用增强后的 Bitmap 替换
+         * 当前显示的原图。调度器在调用前已校验位置一致性。
+         */
+        fun setEnhancedBitmap(bitmap: Bitmap) {
+            binding.image.setImageBitmap(bitmap)
         }
     }
 
@@ -288,31 +289,24 @@ class MangaAdapter(private val context: Context) :
     fun enableMangaSharpen(enable: Boolean, mode: Int) {
         mSharpenEnabled = enable
         mEnhanceMode = mode
-        mEnhancePaused = false
+        // 增强不再走 Glide Transformation，由 MangaEnhanceScheduler 串行推理后
+        // 替换 ImageView；此处仅重绑以触发现有页面重新加载原图
         updateTransformation()
     }
 
     /**
-     * 滑动期间暂停 / 恢复 AI 画质增强。
-     * 暂停后新绑定的页面直接加载原图，保证 fling 流畅；停止滑动后由调用方
-     * 重绑可见项，补上增强图。Lanczos 为纯插值、速度快，不暂停。
-     *
-     * @return 状态是否确实发生了切换（未开启增强 / Lanczos / 状态相同时返回 false）
+     * 取当前基础变换（灰度 / 墨水屏，不含增强）。供调度器加载原图时应用，
+     * 保证推理输入与 Glide 显示的原图视觉一致（先加载原图，增强后替换）。
      */
-    fun setEnhancePaused(paused: Boolean): Boolean {
-        if (!mSharpenEnabled || mEnhanceMode == MangaEnhanceNcnn.MODE_LANCZOS) {
-            return false
-        }
-        if (mEnhancePaused == paused) {
-            return false
-        }
-        mEnhancePaused = paused
-        buildTransformation()
-        return true
-    }
+    fun getBaseTransformation(): Transformation<Bitmap>? = mTransformation
+
+    fun isEnhanceEnabled() = mSharpenEnabled
+
+    fun getEnhanceMode() = mEnhanceMode
 
     /**
-     * 按当前开关组合图片变换：画质增强可与灰色/墨水屏叠加
+     * 按当前开关组合图片变换：增强由调度器统一接管，Glide 路径仅叠加
+     * 灰度 / 墨水屏等轻量变换。
      */
     private fun updateTransformation() {
         buildTransformation()
@@ -320,23 +314,10 @@ class MangaAdapter(private val context: Context) :
     }
 
     private fun buildTransformation() {
-        val baseTransformation: BitmapTransformation? = when {
+        mTransformation = when {
             mEinkEnabled -> EpaperTransformation(currentMangaEInkThreshold)
             mGrayEnabled -> GrayscaleTransformation()
             else -> null
-        }
-        val transformations = mutableListOf<BitmapTransformation>()
-        // 滑动暂停期间跳过 AI 变换，fling 过程中新绑定的页面直接显示原图
-        if (mSharpenEnabled && !mEnhancePaused) {
-            transformations.add(MangaEnhanceTransformation(mEnhanceMode))
-        }
-        if (baseTransformation != null) {
-            transformations.add(baseTransformation)
-        }
-        mTransformation = when {
-            transformations.isEmpty() -> null
-            transformations.size == 1 -> transformations[0]
-            else -> MultiTransformation(*transformations.toTypedArray())
         }
     }
 }

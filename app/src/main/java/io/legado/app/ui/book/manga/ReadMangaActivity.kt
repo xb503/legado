@@ -2,8 +2,10 @@ package io.legado.app.ui.book.manga
 
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.KeyEvent
 import android.view.Menu
 import android.view.MenuItem
@@ -63,6 +65,10 @@ import io.legado.app.ui.book.manga.entities.MangaPage
 import io.legado.app.ui.book.manga.recyclerview.MangaAdapter
 import io.legado.app.ui.book.manga.recyclerview.MangaLayoutManager
 import io.legado.app.ui.book.manga.recyclerview.ScrollTimer
+import io.legado.app.ui.book.manga.recyclerview.mangaImagePath
+import io.legado.app.manga.MangaEnhanceNcnn
+import io.legado.app.manga.MangaEnhanceScheduler
+import com.bumptech.glide.load.Transformation
 import io.legado.app.ui.book.read.MangaMenu
 import io.legado.app.ui.book.read.ReadBookActivity.Companion.RESULT_DELETED
 import io.legado.app.ui.book.read.showBookDownloadDialog
@@ -102,6 +108,23 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
     }
     private val mAdapter: MangaAdapter by lazy {
         MangaAdapter(this)
+    }
+
+    /**
+     * 漫画 AI 画质增强调度器：方案 B——Glide 先加载原图显示，调度器
+     * 串行推理完成后用增强 Bitmap 替换 ImageView。滑动 / fling 期间
+     * 不新增任务，停下后按落点重建 [P, P+1, P+2] 三张窗口。
+     */
+    private val enhanceScheduler: MangaEnhanceScheduler by lazy {
+        MangaEnhanceScheduler(
+            enhanceFn = { pos -> enhancePageBitmap(pos) },
+            deliverFn = { pos, bitmap ->
+                val vh = binding.recyclerView.findViewHolderForAdapterPosition(pos)
+                if (vh is MangaAdapter.PageViewHolder) {
+                    vh.setEnhancedBitmap(bitmap)
+                }
+            }
+        )
     }
 
     private val mSizeProvider by lazy {
@@ -280,32 +303,13 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
                     } ?: false
                 }
             }
-            // AI 画质增强较重：拖动/fling 期间暂停，新绑定页面直接显示原图保证
-            // 滑动跟手；停止后重绑可见范围，补上增强图（已增强的走缓存，零成本）
+            // AI 画质增强调度：拖动/fling 期间不新增任务，保留正在跑的，
+            // 停下后按落点重建 [P,P+1,P+2] 三张窗口。调度器内部串行推理
+            // + abort 中断，先加载原图显示，推理完成后替换 ImageView。
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
                 override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
-                    when (newState) {
-                        RecyclerView.SCROLL_STATE_DRAGGING,
-                        RecyclerView.SCROLL_STATE_SETTLING -> {
-                            mAdapter.setEnhancePaused(true)
-                        }
-
-                        RecyclerView.SCROLL_STATE_IDLE -> {
-                            if (mAdapter.setEnhancePaused(false)) {
-                                val lm = rv.layoutManager as? LinearLayoutManager
-                                    ?: return
-                                val first = lm.findFirstVisibleItemPosition()
-                                val last = lm.findLastVisibleItemPosition()
-                                if (first != RecyclerView.NO_POSITION
-                                    && last != RecyclerView.NO_POSITION && last >= first
-                                ) {
-                                    mAdapter.notifyItemRangeChanged(
-                                        first, last - first + 1
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    if (!mAdapter.isEnhanceEnabled()) return
+                    enhanceScheduler.onScrollStateChanged(rv, newState)
                 }
             })
         }
@@ -379,6 +383,12 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
                     } else {
                         loadMoreView.startLoad()
                     }
+                }
+
+                // 数据加载完成：清空旧增强缓存，按落点触发首屏增强
+                if (mAdapter.isEnhanceEnabled()) {
+                    enhanceScheduler.clearCache()
+                    enhanceScheduler.onPositionChanged(pos)
                 }
             }
         }
@@ -496,7 +506,58 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
         }
     }
 
+    /**
+     * 由调度器在工作线程调用：加载原图 → 调用 native 推理 → 创建增强 Bitmap。
+     * 内部已包含模型未就绪时的同步初始化，模型加载完成会自动重新触发
+     * 调度器重建窗口。
+     */
+    private fun enhancePageBitmap(position: Int): Bitmap? {
+        if (!mAdapter.isEnhanceEnabled()) return null
+        val mode = mAdapter.getEnhanceMode()
+        if (!MangaEnhanceNcnn.isLibraryLoaded()) return null
+        if (mode != MangaEnhanceNcnn.MODE_LANCZOS) {
+            if (!MangaEnhanceNcnn.isReady(mode)) {
+                // 模型未就绪，尝试在 worker 线程同步加载（不阻塞 UI）
+                MangaEnhanceNcnn.ensureInit(this, mode)
+                if (!MangaEnhanceNcnn.isReady(mode)) return null
+            }
+        }
+
+        val item = mAdapter.getItem(position) as? MangaPage ?: return null
+        val baseTransform: Transformation<Bitmap>? = mAdapter.getBaseTransformation()
+
+        val original: Bitmap? = try {
+            val req = Glide.with(this).asBitmap()
+                .load(mangaImagePath(item.mImageUrl))
+            val withTransform = if (baseTransform != null) req.transform(baseTransform) else req
+            withTransform.submit().get()
+        } catch (e: Throwable) {
+            Log.e(TAG, "load original bitmap failed pos=$position", e)
+            null
+        }
+        if (original == null) return null
+
+        val w = original.width
+        val h = original.height
+        if (w <= 0 || h <= 0) return null
+        // 超过 500 万像素的大图（超长截图）跳过超分，防止 OOM
+        if (w.toLong() * h > 5_000_000L) return null
+
+        val pixels = IntArray(w * h)
+        original.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        val upscaled = MangaEnhanceNcnn.upscale(pixels, w, h, mode) ?: return null
+        val resultW = w * 2
+        val resultH = h * 2
+        if (upscaled.size < resultW * resultH) return null
+
+        return Bitmap.createBitmap(resultW, resultH, Bitmap.Config.ARGB_8888).also {
+            it.setPixels(upscaled, 0, resultW, 0, 0, resultW, resultH)
+        }
+    }
+
     override fun onDestroy() {
+        enhanceScheduler.shutdown()
         ReadManga.unregister(this)
         super.onDestroy()
     }
@@ -1014,6 +1075,17 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
                     val targetMode =
                         if (enable) mode else io.legado.app.manga.MangaEnhanceNcnn.MODE_LANCZOS
                     io.legado.app.manga.MangaEnhanceNcnn.ensureInit(this@ReadMangaActivity, targetMode)
+                    // 模型加载 / 释放完成后，重新触发调度器重建窗口
+                    binding.recyclerView.post {
+                        if (enable) {
+                            enhanceScheduler.clearCache()
+                            enhanceScheduler.onScrollStateChanged(
+                                binding.recyclerView, RecyclerView.SCROLL_STATE_IDLE
+                            )
+                        } else {
+                            enhanceScheduler.clearCache()
+                        }
+                    }
                 }
             }
             .setNegativeButton(R.string.cancel, null)

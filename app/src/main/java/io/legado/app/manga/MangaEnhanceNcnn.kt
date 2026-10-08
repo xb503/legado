@@ -85,6 +85,13 @@ object MangaEnhanceNcnn {
     external fun nativeUpscale(pixels: IntArray, width: Int, height: Int, mode: Int): IntArray?
     private external fun nativeRelease()
 
+    /**
+     * 设置中止标志：C++ 分块推理循环在每个 tile 完成后检查此标志，若为 true
+     * 立即停止后续 tile 推理。调度器在用户翻页到不在此轮增强窗口时调用，
+     * 避免老推理独占 GPU 导致整机卡顿。下一次 [nativeInit] 会自动清除此标志。
+     */
+    external fun nativeSetAbort(abort: Boolean)
+
     fun isLibraryLoaded(): Boolean = libLoaded
 
     /**
