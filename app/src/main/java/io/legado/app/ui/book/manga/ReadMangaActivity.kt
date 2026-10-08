@@ -532,7 +532,7 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
             val withTransform = if (baseTransform != null) req.transform(baseTransform) else req
             withTransform.submit().get()
         } catch (e: Throwable) {
-            Log.e(TAG, "load original bitmap failed pos=$position", e)
+            Log.e("ReadMangaActivity", "load original bitmap failed pos=$position", e)
             null
         }
         if (original == null) return null

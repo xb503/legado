@@ -86,7 +86,7 @@ class MangaEnhanceScheduler(
                     MangaEnhanceNcnn.nativeSetAbort(true)
                 }
                 pendingQueue.clear()
-                window.forEach { pendingQueue.addLast(pos) }
+                window.forEach { pendingQueue.addLast(it) }
             }
             (pendingLock as java.lang.Object).notifyAll()
         }
