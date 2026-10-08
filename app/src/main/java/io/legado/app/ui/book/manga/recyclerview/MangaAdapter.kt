@@ -54,6 +54,13 @@ class MangaAdapter(private val context: Context) :
 
     var isHorizontal = false
 
+    /**
+     * 增强 Bitmap 缓存查询（由 Activity 注入调度器）。onBind 时若该页
+     * 已被调度器预增强，直接显示增强图、跳过 Glide 原图请求，实现
+     * "滑到下一页时已是增强好的效果"。
+     */
+    var enhancedBitmapProvider: ((position: Int) -> Bitmap?)? = null
+
     private val mDiffCallback: DiffUtil.ItemCallback<Any> = object : DiffUtil.ItemCallback<Any>() {
         override fun areItemsTheSame(oldItem: Any, newItem: Any): Boolean {
             return if (oldItem is ReaderLoading && newItem is ReaderLoading) {
@@ -109,9 +116,15 @@ class MangaAdapter(private val context: Context) :
             }
         }
 
-        fun onBind(item: MangaPage) {
+        fun onBind(item: MangaPage, position: Int) {
             setImageColorFilter()
             val isLastImage = item.imageCount > 0 && item.index == item.imageCount - 1
+            // 优先显示调度器已预增强的缓存 Bitmap，跳过 Glide 原图加载
+            val cached = enhancedBitmapProvider?.invoke(position)
+            if (cached != null) {
+                showEnhancedBitmap(cached, isHorizontal, isLastImage)
+                return
+            }
             loadImageWithRetry(
                 item.mImageUrl, isHorizontal, isLastImage, mTransformation
             )
@@ -210,7 +223,7 @@ class MangaAdapter(private val context: Context) :
 
     override fun onBindViewHolder(vh: RecyclerView.ViewHolder, position: Int) {
         when (vh) {
-            is PageViewHolder -> vh.onBind(getItem(position) as MangaPage)
+            is PageViewHolder -> vh.onBind(getItem(position) as MangaPage, position)
             is PageMoreViewHolder -> vh.onBind(getItem(position) as ReaderLoading)
         }
     }

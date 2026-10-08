@@ -37,8 +37,9 @@ class MangaEnhanceScheduler(
     companion object {
         private const val TAG = "MangaEnhanceScheduler"
         private const val WINDOW_SIZE = 3
-        // 增强图内存缓存上限（字节）。约 3 张 1440x1840 ARGB_8888 大小
-        private const val CACHE_LIMIT_BYTES = 32L * 1024L * 1024L
+        // 增强图内存缓存上限（字节）。需保证三张窗口 [P,P+1,P+2] 都能驻留：
+        // 921x1200 页 2x 后约 17.7MB/张，3 张约 53MB；690 宽页约 11MB/张
+        private const val CACHE_LIMIT_BYTES = 64L * 1024L * 1024L
     }
 
     @Volatile var currentPosition: Int = -1
@@ -74,20 +75,23 @@ class MangaEnhanceScheduler(
         currentPosition = newPos
         val window = IntArray(WINDOW_SIZE) { newPos + it }
         synchronized(pendingLock) {
-            if (runningPosition in window) {
-                // 正在跑的页 ∈ 新窗口：保留它跑完，重建 pending 为窗口中除它外的项
-                pendingQueue.clear()
-                window.forEach { pos ->
-                    if (pos != runningPosition) pendingQueue.addLast(pos)
-                }
-            } else {
-                // 正在跑的页不在新窗口内：abort 它
-                if (runningPosition != -1) {
-                    MangaEnhanceNcnn.nativeSetAbort(true)
-                }
-                pendingQueue.clear()
-                window.forEach { pendingQueue.addLast(it) }
+            // 正在跑的页 ∈ 新窗口：保留它跑完；否则 abort 它
+            val keepRunning = runningPosition in window
+            if (!keepRunning && runningPosition != -1) {
+                MangaEnhanceNcnn.nativeSetAbort(true)
             }
+            // 重建 pending：窗口中除正在跑的页以外、且尚无增强缓存的页
+            pendingQueue.clear()
+            window.forEach { pos ->
+                if (pos != runningPosition && enhancedCache.get(pos) == null) {
+                    pendingQueue.addLast(pos)
+                }
+            }
+            Log.i(
+                TAG,
+                "window=$newPos..${newPos + WINDOW_SIZE - 1} " +
+                        "keepRunning=$keepRunning running=$runningPosition queued=$pendingQueue"
+            )
             (pendingLock as java.lang.Object).notifyAll()
         }
     }
@@ -148,40 +152,56 @@ class MangaEnhanceScheduler(
                 }
             }
             if (!running) return null
-            return pendingQueue.removeFirst()
+            val task = pendingQueue.removeFirst()
+            runningPosition = task
+            // 必须在锁内、且在取出新任务之后清除 abort：
+            // 与 onPositionChanged 的 abort(true) 互斥，既避免新任务被
+            // 上轮残留标志误杀，也避免清掉针对旧任务的新一轮 abort
+            MangaEnhanceNcnn.nativeSetAbort(false)
+            return task
         }
     }
 
     private fun processTask(task: Int) {
-        // 重置 abort（上一轮可能被 abort 中止）
-        MangaEnhanceNcnn.nativeSetAbort(false)
-        runningPosition = task
         try {
-            if (currentPosition != task) return
+            // 窗口内所有页（当前页 + 预读页）都要执行，不能用
+            // currentPosition == task 过滤，否则预读永远不会发生。
+            // 任务是否已失效由 onPositionChanged 清队列 + abort 负责。
 
-            // 先查缓存
+            // 先查缓存（理论上入队时已过滤，双重保险）
             enhancedCache.get(task)?.let { cached ->
                 deliverResult(task, cached)
                 return
             }
 
-            // 推理（enhanceFn 内部已包含原图加载 + nativeUpscale + Bitmap 创建）
+            // 推理（enhanceFn 内部已包含原图加载 + nativeUpscale + Bitmap 创建；
+            // abort 生效时 nativeUpscale 返回 null，enhanceFn 返回 null）
             val result = enhanceFn(task)
-            if (result != null && currentPosition == task) {
+            if (result != null) {
                 enhancedCache.put(task, result)
+                Log.i(TAG, "enhanced pos=$task cacheHint=${result.byteCount}")
                 deliverResult(task, result)
+            } else {
+                Log.i(TAG, "enhance skipped pos=$task (aborted or unavailable)")
             }
         } catch (t: Throwable) {
             Log.e(TAG, "enhance failed for pos=$task", t)
         } finally {
-            runningPosition = -1
+            synchronized(pendingLock) {
+                runningPosition = -1
+                // 本任务若因翻页被 abort，新窗口可能已在 abort 后重建入队；
+                // 若恰好队列为空也无需特殊处理
+                (pendingLock as java.lang.Object).notifyAll()
+            }
         }
     }
 
     private fun deliverResult(task: Int, bitmap: Bitmap) {
-        // 投递到主线程，执行时再次校验位置
+        // 投递到主线程；仅替换仍属于当前阅读窗口 [P, P+2] 的页面，
+        // 旧窗口任务的结果只保留在缓存中供之后命中。VH 尚不存在时
+        // deliverFn 内部判空跳过，等该页 onBind 时从缓存直接显示
         mainHandler.post {
-            if (currentPosition == task) {
+            if (task in currentPosition..currentPosition + WINDOW_SIZE - 1) {
                 deliverFn(task, bitmap)
             }
         }

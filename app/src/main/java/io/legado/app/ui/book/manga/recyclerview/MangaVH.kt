@@ -106,36 +106,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                     isFirstResource: Boolean,
                 ): Boolean {
                     mFlProgress.isGone = true
-                    if (!isHorizontal) {
-                        itemView.updateLayoutParams<ViewGroup.LayoutParams> {
-                            height = ViewGroup.LayoutParams.WRAP_CONTENT
-                        }
-                        mImage.updateLayoutParams<FrameLayout.LayoutParams> {
-                            gravity = Gravity.NO_GRAVITY
-                        }
-                        if (isLastImage) {
-                            mImage.updateLayoutParams<FrameLayout.LayoutParams> {
-                                height = ViewGroup.LayoutParams.WRAP_CONTENT
-                            }
-                            itemView.minimumHeight = minHeight
-                        } else {
-                            mImage.updateLayoutParams<FrameLayout.LayoutParams> {
-                                height = ViewGroup.LayoutParams.MATCH_PARENT
-                            }
-                            itemView.minimumHeight = 0
-                        }
-                        mImage.scaleType = ImageView.ScaleType.FIT_XY
-                    } else {
-                        itemView.updateLayoutParams<ViewGroup.LayoutParams> {
-                            height = ViewGroup.LayoutParams.MATCH_PARENT
-                        }
-                        itemView.minimumHeight = 0
-                        mImage.updateLayoutParams<FrameLayout.LayoutParams> {
-                            height = ViewGroup.LayoutParams.MATCH_PARENT
-                            gravity = Gravity.CENTER
-                        }
-                        mImage.scaleType = ImageView.ScaleType.FIT_CENTER
-                    }
+                    applyImageLayout(isHorizontal, isLastImage)
                     return false
                 }
             }).into(mImage)
@@ -143,5 +114,57 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
             e.printOnDebug()
         }
 
+    }
+
+    /**
+     * 图片就绪后的尺寸 / 布局调整。Glide 原图加载完成与
+     * 调度器增强缓存命中直显两条路径共用，保证布局一致。
+     */
+    fun applyImageLayout(isHorizontal: Boolean, isLastImage: Boolean) {
+        if (!isHorizontal) {
+            itemView.updateLayoutParams<ViewGroup.LayoutParams> {
+                height = ViewGroup.LayoutParams.WRAP_CONTENT
+            }
+            mImage.updateLayoutParams<FrameLayout.LayoutParams> {
+                gravity = Gravity.NO_GRAVITY
+            }
+            if (isLastImage) {
+                mImage.updateLayoutParams<FrameLayout.LayoutParams> {
+                    height = ViewGroup.LayoutParams.WRAP_CONTENT
+                }
+                itemView.minimumHeight = minHeight
+            } else {
+                mImage.updateLayoutParams<FrameLayout.LayoutParams> {
+                    height = ViewGroup.LayoutParams.MATCH_PARENT
+                }
+                itemView.minimumHeight = 0
+            }
+            mImage.scaleType = ImageView.ScaleType.FIT_XY
+        } else {
+            itemView.updateLayoutParams<ViewGroup.LayoutParams> {
+                height = ViewGroup.LayoutParams.MATCH_PARENT
+            }
+            itemView.minimumHeight = 0
+            mImage.updateLayoutParams<FrameLayout.LayoutParams> {
+                height = ViewGroup.LayoutParams.MATCH_PARENT
+                gravity = Gravity.CENTER
+            }
+            mImage.scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+    }
+
+    /**
+     * 增强缓存命中时直接显示增强 Bitmap，跳过 Glide 原图请求
+     * （调度器已提前完成当前页 / 预读页推理）。
+     */
+    fun showEnhancedBitmap(bitmap: Bitmap, isHorizontal: Boolean, isLastImage: Boolean) {
+        (mImage.tag as? String)?.let { ProgressManager.removeListener(it) }
+        mImage.tag = null
+        mFlProgress.isGone = true
+        mLoading.isGone = true
+        mRetry?.isGone = true
+        mProgress.isGone = true
+        applyImageLayout(isHorizontal, isLastImage)
+        mImage.setImageBitmap(bitmap)
     }
 }

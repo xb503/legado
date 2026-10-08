@@ -248,6 +248,8 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
             enableMangaEInk(AppConfig.enableMangaEInk, AppConfig.mangaEInkThreshold)
             enableGray(AppConfig.enableMangaGray)
             enableMangaSharpen(AppConfig.enableMangaSharpen, AppConfig.mangaEnhanceMode)
+            // onBind 时优先取调度器已预增强的 Bitmap，滑到下一页直接是增强效果
+            enhancedBitmapProvider = { pos -> enhanceScheduler.getCachedBitmap(pos) }
         }
         if (AppConfig.enableMangaSharpen) {
             val mode = AppConfig.mangaEnhanceMode
@@ -565,6 +567,7 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
     override fun onLowMemory() {
         super.onLowMemory()
         Glide.get(this).clearMemory()
+        enhanceScheduler.clearCache()
     }
 
     override fun sureNewProgress(progress: BookProgress) {
