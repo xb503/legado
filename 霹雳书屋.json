@@ -1,0 +1,65 @@
+[
+  {
+    "bookSourceComment": "//2025.7.15 by.◎辞晨◎\n//2026.11.06 修复：移除作者名校验，导入即可直接使用",
+    "bookSourceGroup": "🌙 好用",
+    "bookSourceName": "🌩️ 霹雳书屋",
+    "bookSourceType": 0,
+    "bookSourceUrl": "https://www.pilishuwu.com",
+    "bookUrlPattern": "https:\\/\\/www\\.\\w+\\.\\w+/\\d+/\\d+/info\\.html",
+    "customOrder": 354,
+    "enabled": true,
+    "enabledCookieJar": true,
+    "enabledExplore": true,
+    "exploreUrl": "@js:\nsort=[];\npush=(title,url,type1,type2)=>sort.push({\n\t\ttitle: title,\n\t\turl: url,\n\t\tstyle: {\n\t\t\t\tlayout_flexGrow: type1,\n\t\t\t\tlayout_flexBasisPercent: type2\n\t\t\t}\n\t});\n\tpush(\"全部🌊分类\",null,1,1)\n\tarList=[[\"全部小说\",\"0\"],[\"男频网文\",\"1\"],[\"女频言情\",\"2\"],[\"电子图书\",\"3\"],[\"无CP小说\",\"4\"],[\"纯爱小说\",\"5\"],[\"百合小说\",\"6\",],[\"轻小说\",\"8\"]]\n\tarList.map([title,uri]=>{\n\t\turl=`{{getUrl()}}${uri}/list/{{page}}.html`;\n\t\tpush(title,url,1,0.25);\n\t\t});\n\t\tpush(\"🌊排行榜🌊\",null,1,1)\n\t\tmrList=[[\"最新入库\",\"1\"],[\"全部点击\",\"2\"],[\"本年点击\",\"3\"],[\"本月点击\",\"4\"],[\"本周点击\",\"5\"],[\"本日点击\",\"6\"],[\"全部收藏\",\"7\"],[\"全部推荐\",\"12\"]]\n\t\tmrList.map([tag,uri]=>{\n\t\t\turl=`{{getUrl()}}top/list/0/${uri}/1.html`;\n\t\t\tpush(tag,url,1,0.25);\n\t\t\t});\n//java.log(JSON.stringify(sort))\nJSON.stringify(sort)",
+    "header": "<js>\nJSON.stringify({\n  'User-Agent': java.getWebViewUA(),\n  'sec-ch-ua-platform': \"\\\"Android\\\"\",\n  'origin': getUrl(),\n  'x-requested-with': \"cn.mujiankeji.mbrowser\",\n  'Referer': getUrl(),\n  'Accept-Language': \"zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7\"\n})\n</js>",
+    "jsLib": "function getUrl() {\n    return 'https://www.pilishuwu.com/';\n}",
+    "lastUpdateTime": 1793413601077,
+    "loginCheckJs": "var src = result.body();\nif(key && /Just a moment/.test(src)){\n\turl = java.ruleUrl;\n\tresult = java.startBrowserAwait(url, \"验证\");\n\t}\nresult",
+    "loginUi": "",
+    "loginUrl": "",
+    "respondTime": 180000,
+    "ruleBookInfo": {
+      "author": ".x-detail__info--author.0@text##作者：",
+      "canReName": "true",
+      "coverUrl": "img.0@src",
+      "intro": "&nbsp;\n📖 书名：{{@@.x-detail__info--title.0@text}}\n👤 作者：{{@@.x-detail__info--author@text##作者：}}\n🔖 标签：{{@@.x-detail__intro--tags@text##\\s##,}}\n🕰 最新：{{@@.x-catalog__new@text##最新}} {{@@.x-catalog__update@text##更新于：}}\n🏷 简介：{{@@.x-detail__intro--content@text}}",
+      "kind": "{{@@.x-detail__info--words.0@text##分类：}},{{@@.x-detail__intro--tags@text##\\s##,}}",
+      "lastChapter": ".x-catalog__new@text##最新",
+      "name": ".x-detail__info--title.0@text",
+      "tocUrl": "text.章节目录@href"
+    },
+    "ruleContent": {
+      "content": "<js>\nif(result.match(/Just a moment.../)){\ncookie.removeCookie(source.bookSourceUrl)\nvar s=java.startBrowserAwait(baseUrl,\"验证\").body();\nresult=s;\n\t}else{\n\t\tresult=result;\n\t\t}\n\tresult;\n</js>\n$..content[*]",
+      "replaceRegex": "##第(.*?)章.*"
+    },
+    "ruleExplore": {
+      "author": "{{@@[class=\"x-book__info--author\"]@textNodes}}{{@@[class=\"x-info__author\"]@span.0@text}}",
+      "bookList": "<js>\nif(result.match(/Just a moment.../)){\ncookie.removeCookie(source.bookSourceUrl)\nvar s=java.startBrowserAwait(baseUrl,\"验证\").body();\nresult=s;\n\t}else{\n\t\tresult=result;\n\t\t}\n\tresult;\n</js>\n.x-book",
+      "bookUrl": "a.0@href",
+      "coverUrl": "img@data-src",
+      "intro": ".x-book__info--chapter@text&&.x-info__intro@text",
+      "kind": "{{@@.red@text}},{{@@.x-book__tags@span@text}},{{@@.x-info__author@textNodes}}",
+      "name": "p.0@text",
+      "wordCount": ".blue@text"
+    },
+    "ruleSearch": {
+      "author": ".book-status@text",
+      "bookList": "<js>\n//java.log(result)\nif(result.match(/Tis/)){\n\tjava.toast('❗\\n请不要频繁刷新，请休息几秒再试吧❗')\n}result;\n</js>\n.x-book",
+      "bookUrl": "a@href",
+      "checkKeyWord": "穿进男团选秀后",
+      "coverUrl": "img@src||img@data-cfsrc",
+      "intro": ".x-book__intro@text",
+      "kind": ".book-fenlei@text",
+      "name": "p.0@text",
+      "wordCount": ".book-wordcount@text"
+    },
+    "ruleToc": {
+      "chapterList": "ol@li!0@a",
+      "chapterName": "text",
+      "chapterUrl": "href\n<js>\nlet p = result.match(/\\/read\\/(\\d+)\\./);\nlet pi = result.match(/cid\\=(\\d+)$/);\n\nif (p || pi) {\n  url = \"/wmcms/ajax/index.php?action=novel.getchapter&cid=\" + (p? p[1] : pi[1]) + \"&format=1\";\n}\n</js>\n"
+    },
+    "searchUrl": "{{getUrl()}}search/0/{{key}}/{{page}}.html",
+    "variableComment": "",
+    "weight": 0
+  }
+]
