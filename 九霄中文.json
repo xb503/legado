@@ -1,0 +1,40 @@
+{
+  "bookSourceName": "九霄中文",
+  "bookSourceType": 0,
+  "bookSourceUrl": "https://jiuxiaozw.com",
+  "bookSourceGroup": "小说",
+  "bookUrlPattern": "https?://jiuxiaozw\\.com/(?:sim/)?book/[0-9a-f]{16,}",
+  "enabled": true,
+  "enabledExplore": true,
+  "enabledCookieJar": true,
+  "header": "{\"User-Agent\":\"Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36\"}",
+  "searchUrl": "https://jiuxiaozw.com/api/books?q={{key}}&limit=20&page={{page}}",
+  "exploreUrl": "[{\"title\":\"✨ 九霄中文 · 发现 ✨\",\"url\":\"https://jiuxiaozw.com/sim/latest?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":1,\"layout_wrapBefore\":true,\"layout_alignSelf\":\"center\"}},{\"title\":\"✣ 书库 ✣\",\"url\":\"https://jiuxiaozw.com/sim/new?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":1,\"layout_wrapBefore\":true,\"layout_alignSelf\":\"center\"}},{\"title\":\"最近更新\",\"url\":\"https://jiuxiaozw.com/sim/latest?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"新书\",\"url\":\"https://jiuxiaozw.com/sim/new?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"完本\",\"url\":\"https://jiuxiaozw.com/sim/completed?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"✣ 分类 ✣\",\"url\":\"https://jiuxiaozw.com/sim/category/fantasy?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":1,\"layout_wrapBefore\":true,\"layout_alignSelf\":\"center\"}},{\"title\":\"玄幻\",\"url\":\"https://jiuxiaozw.com/sim/category/fantasy?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"奇幻\",\"url\":\"https://jiuxiaozw.com/sim/category/magic?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"武侠\",\"url\":\"https://jiuxiaozw.com/sim/category/wuxia?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"仙侠\",\"url\":\"https://jiuxiaozw.com/sim/category/xianxia?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"都市\",\"url\":\"https://jiuxiaozw.com/sim/category/urban?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"现实\",\"url\":\"https://jiuxiaozw.com/sim/category/reality?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"历史\",\"url\":\"https://jiuxiaozw.com/sim/category/history?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"军事\",\"url\":\"https://jiuxiaozw.com/sim/category/military?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"游戏\",\"url\":\"https://jiuxiaozw.com/sim/category/game?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"体育\",\"url\":\"https://jiuxiaozw.com/sim/category/sports?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"科幻\",\"url\":\"https://jiuxiaozw.com/sim/category/sci-fi?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"诸天无限\",\"url\":\"https://jiuxiaozw.com/sim/category/multiverse?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"悬疑\",\"url\":\"https://jiuxiaozw.com/sim/category/mystery?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"轻小说\",\"url\":\"https://jiuxiaozw.com/sim/category/light-novel?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"言情\",\"url\":\"https://jiuxiaozw.com/sim/category/romance?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"文学\",\"url\":\"https://jiuxiaozw.com/sim/category/literature?page={{page}}\",\"style\":{\"layout_flexBasisPercent\":0.32}},{\"title\":\"✣ 排行榜 ✣\",\"url\":\"https://jiuxiaozw.com/sim/ranking\",\"style\":{\"layout_flexBasisPercent\":1,\"layout_wrapBefore\":true,\"layout_alignSelf\":\"center\"}},{\"title\":\"日榜\",\"url\":\"https://jiuxiaozw.com/sim/ranking\",\"style\":{\"layout_flexBasisPercent\":0.45}}]",
+  "ruleSearch": {
+    "bookList": "$[*]",
+    "name": "$.title",
+    "author": "$.author",
+    "kind": "$.category",
+    "intro": "$.description",
+    "coverUrl": "$.cover_image",
+    "bookUrl": "https://jiuxiaozw.com/sim/book/{{$.id}}"
+  },
+  "ruleBookInfo": {
+    "name": "h1@text",
+    "author": ".book-meta a@text",
+    "kind": ".book-meta span.text-gray-900@text",
+    "intro": ".book-description@text",
+    "lastChapter": ".book-latest-newest .book-latest-title@text",
+    "coverUrl": ".book-hero-cover img@src",
+    "tocUrl": "@js:(function(){var m=String(book.bookUrl).match(/book\\/([0-9a-f]+)/); return m ? 'https://jiuxiaozw.com/api/books/'+m[1]+'/catalog?offset=0&limit=2000' : book.bookUrl;})()"
+  },
+  "ruleToc": {
+    "chapterList": "$.rows[*]",
+    "chapterName": "$.title",
+    "chapterUrl": "@js:(function(){var m=String(book.bookUrl).match(/book\\/([0-9a-f]+)/); var id=''; try{id=result.id||'';}catch(e){} if(!id){try{id=JSON.parse(String(result)).id;}catch(e2){}} return 'https://jiuxiaozw.com/book/'+m[1]+'/'+id;})()",
+    "nextTocUrl": "@js:(function(){var d; try{d=JSON.parse(String(result));}catch(e){return '';} var next=(d.offset||0)+(d.rows?d.rows.length:0); if(next<(d.total||0)){var m=String(baseUrl).match(/^([^?]+)/); return m[1]+'?offset='+next+'&limit=2000';} return '';})()"
+  },
+  "ruleContent": {
+    "content": "@js:(function(){var d=org.jsoup.Jsoup.parse(String(result)); var ps=d.select('p.reader-paragraph'); var arr=[]; for(var i=0;i<ps.size();i++){var t=ps.get(i).text(); if(t&&t.length>0)arr.push(t);} return arr.join('\\n');})()"
+  }
+}
