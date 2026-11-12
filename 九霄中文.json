@@ -35,6 +35,6 @@
     "nextTocUrl": "@js:(function(){var d; try{d=JSON.parse(String(result));}catch(e){return '';} var next=(d.offset||0)+(d.rows?d.rows.length:0); if(next<(d.total||0)){var m=String(baseUrl).match(/^([^?]+)/); return m[1]+'?offset='+next+'&limit=2000';} return '';})()"
   },
   "ruleContent": {
-    "content": "@js:(function(){var d=org.jsoup.Jsoup.parse(String(result)); var ps=d.select('p.reader-paragraph'); var arr=[]; for(var i=0;i<ps.size();i++){var t=ps.get(i).text(); if(t&&t.length>0)arr.push(t);} return arr.join('\\n');})()"
+    "content": "class.reader-paragraph@text"
   }
 }
