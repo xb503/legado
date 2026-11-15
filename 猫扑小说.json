@@ -1,9 +1,9 @@
 {
   "bookSourceName": "猫扑小说",
   "bookSourceType": 0,
-  "bookSourceUrl": "https://www.rrssk.com",
+  "bookSourceUrl": "https://www.mopbook.com",
   "bookSourceGroup": "小说",
-  "bookSourceComment": "搜索走 rrssk，书页在 mopbook。两站都有人机验证：需要时自动弹出验证页，完成图片验证码后会自动继续，无需手动登录。",
+  "bookSourceComment": "书源起点为猫扑小说 mopbook，搜索接口在 rrssk。两站都有人机验证：需要时自动弹出验证页，完成图片验证码后自动继续，无需手动登录。",
   "bookUrlPattern": "https?://www\\.mopbook\\.com/book/[0-9A-Z]+\\.html",
   "enabled": true,
   "enabledExplore": true,
