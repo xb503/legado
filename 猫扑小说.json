@@ -15,11 +15,11 @@
   "ruleSearch": {
     "bookList": "class.book-card",
     "name": "class.book-card__title@text",
-    "author": "class.book-card__meta-item.0@text@js:result.replace(/^作者[:：]\\s*/,'')",
-    "kind": "class.book-card__meta-item.1@text@js:result.replace(/^分类[:：]\\s*/,'')",
+    "author": "class.book-card__meta-item.0@ownText@js:String(result).replace(/^作者[:：]\\s*/,'')",
+    "kind": "class.book-card__meta-item.1@ownText@js:String(result).replace(/^分类[:：]\\s*/,'')",
     "intro": "class.book-card__update@text",
     "coverUrl": "class.book-card__cover@img@src",
-    "bookUrl": "@js:var m=String(result).match(/[?&]t=([^&'\"]+)/);if(!m){return '';}var b=m[1].replace(/-/g,'+').replace(/_/g,'/');while(b.length%4!==0){b+='=';}return java.base64Decode(b);"
+    "bookUrl": "class.book-card@onclick@js:var s=String(result);var m=s.match(/[?&]t=([^&'\"]+)/);if(!m){return '';}var b=decodeURIComponent(m[1]).replace(/-/g,'+').replace(/_/g,'/').replace(/[^A-Za-z0-9+/=]/g,'');var c='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';var o='';var buf=0,bits=0,i,v;for(i=0;i<b.length;i++){v=c.indexOf(b.charAt(i));if(v<0)continue;buf=(buf<<6)|v;bits+=6;if(bits>=8){bits-=8;o+=String.fromCharCode((buf>>bits)&255);}}return o;"
   },
   "ruleExplore": {
     "bookList": "class.iBox@li",
