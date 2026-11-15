@@ -464,3 +464,28 @@ description: "制作并修复 Legado（阅读 App）书源/漫画源。当用户
 - 完成后用 `computer:///workspace/<文件>.json` 链接发给用户，提示「重新导入源验证」。
 - **用户看不到 `computer://` 链接时**：直接把完整 JSON 贴在回复的代码块里让用户复制导入，不要只说“文件已生成”。
 - 简明说明改了哪些规则、为什么；语法冲突以本教程为准。
+- 成品同时拷一份到 `/storage/emulated/0/TRAE/`，方便手机直接取。
+
+## 站点有 WAF / 人机验证时（loginUrl + CookieJar）
+
+- **`bookSourceUrl` 必须写成真正需要 Cookie 的域名**。`WebViewLoginFragment` 用 `CookieStore.setCookie(source.getKey(), cookie)` 保存，内部 key 是 `NetworkUtils.getSubDomain(bookSourceUrl)`；发请求时也按同一函数取 Cookie，域名对不上就取不到。
+- 登录入口：源**没有** `loginUi` 表单时，`SourceLoginActivity` 直接打开 `WebViewLoginFragment`，把 `loginUrl` 当 URL 加载（`NetworkUtils.getAbsoluteURL(source.getKey(), loginUrl)`），并在 `onPageStarted` / `onPageFinished` 各保存一次 Cookie。因此 `loginUrl` 直接填验证页地址即可，验证码交给用户手动完成。
+- 实例（猫扑小说搜索）：rrssk 前置 GoEdge WAF，未过验证时搜索接口固定返回“搜索凭证失效”。配置：`loginUrl=https://www.rrssk.com/00PB.html`、`enabledCookieJar=true`，UA 用桌面 Chrome。移动 UA 会被 WAF 直接放行、但**不发** `ge_wc_45` Cookie，反而导致搜索失败。
+- 搜索 JS 要主动识别验证页并抛错，不要静默返回空：
+  `if(html.indexOf('GOEDGE_WAF_CAPTCHA_ID')>=0||html.indexOf('Verify Yourself')>=0) throw new Error('请先点书源菜单“登录”完成验证码');`
+- `java.post` 固定 `followRedirects(false)`，`header('Location')` 可靠；`java.get` 默认跟随重定向，会把验证页当正文返回。
+- 请求头参数一律传 **JSON 字符串**（`JSON.stringify({...})`）；传 JS 对象会抛 `IllegalArgumentException`。
+
+## Legado JS 加解密 API（源码实测）
+
+- 只有 `java.createSymmetricCrypto(transformation, key, iv)`，返回对象支持 `.encryptBase64(str)` / `.encryptHex(str)` / `.encrypt(str)` / `.decrypt(...)`。
+- **没有** `java.aesEncodeToString`。AES-256-CBC 写法：
+  `java.createSymmetricCrypto('AES/CBC/PKCS5Padding', key32, iv16).encryptBase64(JSON.stringify(obj))`
+- `java.base64Decode(str)` 存在；解 URL-safe base64 先 `-`→`+`、`_`→`/` 再补齐 `=`。
+- 加密分页目录（接口 POST 密文）：首页 URL 里额外塞 `pages=`（详情页 `<option>` 数量），`nextTocUrl` 从 `baseUrl` 取回 `page/pages/id`，末页或本页不足 100 条即停止。
+
+## 搜索/列表规则要抓真实 DOM
+
+- 先用浏览器取“第一张结果卡片的 outerHTML”再写选择器，不要猜。本次 `onclick` 长在卡片 `<div class="book-card">` 上而不是按钮，规则须写 `class.book-card@onclick`。
+- 卡片作者/分类带前缀（`作者：`、`分类：`）时用 `@js:result.replace(/^作者[:：]\s*/,'')` 剥掉。
+- 列表里 `jump` 链接常把目标 URL 做 base64 塞进参数，`bookUrl` 用 `@js:` 解码后返回。
