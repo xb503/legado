@@ -489,3 +489,11 @@ description: "制作并修复 Legado（阅读 App）书源/漫画源。当用户
 - 先用浏览器取“第一张结果卡片的 outerHTML”再写选择器，不要猜。本次 `onclick` 长在卡片 `<div class="book-card">` 上而不是按钮，规则须写 `class.book-card@onclick`。
 - 卡片作者/分类带前缀（`作者：`、`分类：`）时用 `@js:result.replace(/^作者[:：]\s*/,'')` 剥掉。
 - 列表里 `jump` 链接常把目标 URL 做 base64 塞进参数，`bookUrl` 用 `@js:` 解码后返回。
+
+## 同一书源里两个域名 UA 策略相反
+
+- 实例：rrssk 只有**桌面 UA** 才触发 GoEdge 验证并下发 `ge_wc_45`；mopbook 反而对桌面 UA 强制 307 跳 `/WAF/VERIFY/CAPTCHA`，移动 UA 直接 200（列表、详情、图片、正文都一样）。
+- 解法：源级 `header` 用桌面 UA（保证 WebView 登录能过验证、搜索能签），所有 mopbook 请求在 URL 末尾追加 `,{"headers":{"User-Agent":"<移动UA>"}}` 逐条覆盖——`exploreUrl`、`bookUrl`（搜索和发现两条规则）、`chapterUrl`、`tocUrl`、`nextTocUrl` 都要加。
+- `AnalyzeUrl` 的 urlOption 支持 `headers` / `method` / `body` / `bodyJs` / `followRedirects` / `charset` / `webView` 等，`option.getHeaderMap()` 会覆盖源 header。
+- 图片请求只带源 header，URL 上加 options 不生效；若图片域名也拦桌面 UA，封面会加载失败（只影响封面，不影响阅读）。
+- `chapterList` 不要盲目加 `+`：Legado 会先无条件 `reverse()`，再按 `book.reverseToc` 决定是否再 `reverse()`，站点升序时默认结果仍是升序；重复章节靠 `LinkedHashSet` 去重（先出现的保留）。
