@@ -497,3 +497,11 @@ description: "制作并修复 Legado（阅读 App）书源/漫画源。当用户
 - `AnalyzeUrl` 的 urlOption 支持 `headers` / `method` / `body` / `bodyJs` / `followRedirects` / `charset` / `webView` 等，`option.getHeaderMap()` 会覆盖源 header。
 - 图片请求只带源 header，URL 上加 options 不生效；若图片域名也拦桌面 UA，封面会加载失败（只影响封面，不影响阅读）。
 - `chapterList` 不要盲目加 `+`：Legado 会先无条件 `reverse()`，再按 `book.reverseToc` 决定是否再 `reverse()`，站点升序时默认结果仍是升序；重复章节靠 `LinkedHashSet` 去重（先出现的保留）。
+
+## 一个源里两个域名都要人机验证怎么办
+
+- `loginUrl` 只能写一个 URL（`WebViewLoginFragment` 里 `NetworkUtils.getAbsoluteURL(source.getKey(), loginUrl)`，单条）；更要命的是登录入口保存 Cookie 用的是 `CookieStore.setCookie(source.getKey(), cookie)`，即 **只存到 bookSourceUrl 的域名**。所以 `bookSourceUrl` 指向 A 站时，登录 B 站等于白登。
+- 需要验证的第二个域名，只能在规则里现场拉起验证页：`java.startBrowserAwait(url, '提示文案')`。它走内置 `WebViewActivity`，保存 Cookie 用的是 `CookieStore.setCookie(实际URL, ...)`，**域名正确**，验证完自动返回。
+- 标准写法：先正常请求 → 判断返回体里有没有验证页特征（GoEdge 是 `GOEDGE_WAF_CAPTCHA_ID` / `Verify Yourself`）→ 有就 `startBrowserAwait(原URL, '请完成人机验证')` → 再请求一次拿真内容。搜索、`tocUrl` 都按这个套路加容错。
+- `startBrowserAwait` 要放在 try/catch 里（`canOpenSourceUi()` 为 false 会抛异常），并用 `throw new Error('提示语')` 把失败原因告诉用户。
+- 别再靠「换 UA 绕过」当主方案：本例 rrssk 移动 UA 直接 200 但 POST 报 `write failed: No space left on device`，mopbook 桌面 UA 必 307，换 UA 只能二选一，最后还是要人在浏览器里过验证。
