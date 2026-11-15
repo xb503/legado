@@ -505,3 +505,8 @@ description: "制作并修复 Legado（阅读 App）书源/漫画源。当用户
 - 标准写法：先正常请求 → 判断返回体里有没有验证页特征（GoEdge 是 `GOEDGE_WAF_CAPTCHA_ID` / `Verify Yourself`）→ 有就 `startBrowserAwait(原URL, '请完成人机验证')` → 再请求一次拿真内容。搜索、`tocUrl` 都按这个套路加容错。
 - `startBrowserAwait` 要放在 try/catch 里（`canOpenSourceUi()` 为 false 会抛异常），并用 `throw new Error('提示语')` 把失败原因告诉用户。
 - 别再靠「换 UA 绕过」当主方案：本例 rrssk 移动 UA 直接 200 但 POST 报 `write failed: No space left on device`，mopbook 桌面 UA 必 307，换 UA 只能二选一，最后还是要人在浏览器里过验证。
+- 用户嫌「登录」入口多余时：直接删掉 `loginUrl`（`hasLogin()` 为 false，菜单里的登录项就消失），改成各入口自愈：
+  - 搜索：`searchUrl` 里先探测，遇验证 `startBrowserAwait` 再重试；
+  - 发现：`exploreUrl` 每条 URL 后加 `,{"js":"(function(){探测;return result;})()"}`（`js` 选项在 URL 解析后执行，可用 `result` 拿到原 URL）；
+  - 目录：`tocUrl` 里判断 `result` 是否验证页，是就拉起验证再 `java.get` 重取。
+  - 这样用户什么都不用点，用到时才弹验证页。
