@@ -510,3 +510,5 @@ description: "制作并修复 Legado（阅读 App）书源/漫画源。当用户
   - 发现：`exploreUrl` 每条 URL 后加 `,{"js":"(function(){探测;return result;})()"}`（`js` 选项在 URL 解析后执行，可用 `result` 拿到原 URL）；
   - 目录：`tocUrl` 里判断 `result` 是否验证页，是就拉起验证再 `java.get` 重取。
   - 这样用户什么都不用点，用到时才弹验证页。
+- 用户报“用不了/没弹验证”时先分清是谁的问题：用真实浏览器把同一操作走一遍。本例 rrssk 服务端 `write failed: No space left on device` + `Failed to write session data`，浏览器搜索同样只有 PHP Warning、零结果，说明是站点自身故障，书源怎么改都没用。
+- `java.post` 遇到非 2xx 会直接抛 `HttpStatusException`（桩里没开 `ignoreHttpErrors`），必须 try/catch，否则把一屏 Kotlin 堆栈甩给用户，且后续的验证兜底根本走不到。失败时要区分「验证页」和「接口 500/403」：前者才拉起 `startBrowserAwait`，后者给一句可读提示。
